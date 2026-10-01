@@ -1,0 +1,28 @@
+{
+  "name": "chatclient",
+  "version": "0.1.0",
+  "description": "A mock Electron desktop instant messaging client",
+  "main": "./out/main/index.js",
+  "author": "chatclient",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "electron-vite build && vue-tsc --noEmit",
+    "preview": "electron-vite preview",
+    "start": "electron ."
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
+    "@vitejs/plugin-vue": "^5.2.4",
+    "electron": "^38.2.0",
+    "element-plus": "^2.10.4",
+    "pinia": "^3.0.3",
+    "vue": "^3.5.18"
+  },
+  "devDependencies": {
+    "electron-vite": "^4.0.0",
+    "typescript": "^5.8.3",
+    "vue-tsc": "^2.2.12"
+  }
+}
