@@ -1,0 +1,115 @@
+package top.zxylearn.chatserver.service;
+
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import org.springframework.stereotype.Service;
+import top.zxylearn.chatserver.entity.Event;
+import top.zxylearn.chatserver.entity.FriendAddRequest;
+import top.zxylearn.chatserver.entity.Group;
+import top.zxylearn.chatserver.entity.GroupJoinRequest;
+import top.zxylearn.chatserver.entity.Message;
+import top.zxylearn.chatserver.entity.User;
+import top.zxylearn.chatserver.entity.UserInbox;
+import top.zxylearn.chatserver.mapper.EventMapper;
+import top.zxylearn.chatserver.mapper.FriendAddRequestMapper;
+import top.zxylearn.chatserver.mapper.GroupJoinRequestMapper;
+import top.zxylearn.chatserver.mapper.GroupMapper;
+import top.zxylearn.chatserver.mapper.MessageMapper;
+import top.zxylearn.chatserver.mapper.UserInboxMapper;
+import top.zxylearn.chatserver.mapper.UserMapper;
+import top.zxylearn.chatserver.vo.FriendRequestResponse;
+import top.zxylearn.chatserver.vo.GroupJoinRequestResponse;
+import top.zxylearn.chatserver.vo.InboxEventResponse;
+import top.zxylearn.chatserver.vo.InboxSyncResponse;
+import top.zxylearn.chatserver.vo.MessageResponse;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+import static top.zxylearn.chatserver.util.TimeUtils.toEpochMilli;
+
+@Service
+public class InboxSyncService {
+
+    private final UserInboxMapper inboxMapper;
+    private final EventMapper eventMapper;
+    private final MessageMapper messageMapper;
+    private final FriendAddRequestMapper friendRequestMapper;
+    private final GroupJoinRequestMapper groupRequestMapper;
+    private final GroupMapper groupMapper;
+    private final UserMapper userMapper;
+
+    public InboxSyncService(
+            UserInboxMapper inboxMapper,
+            EventMapper eventMapper,
+            MessageMapper messageMapper,
+            FriendAddRequestMapper friendRequestMapper,
+            GroupJoinRequestMapper groupRequestMapper,
+            GroupMapper groupMapper,
+            UserMapper userMapper) {
+        this.inboxMapper = inboxMapper;
+        this.eventMapper = eventMapper;
+        this.messageMapper = messageMapper;
+        this.friendRequestMapper = friendRequestMapper;
+        this.groupRequestMapper = groupRequestMapper;
+        this.groupMapper = groupMapper;
+        this.userMapper = userMapper;
+    }
+
+    public InboxSyncResponse sync(long userId, long afterSequence, int requestedLimit) {
+        int limit = Math.max(1, Math.min(requestedLimit, 200));
+        List<UserInbox> rows = inboxMapper.selectList(new LambdaQueryWrapper<UserInbox>()
+                .eq(UserInbox::getUserId, userId)
+                .gt(UserInbox::getSequence, Math.max(0, afterSequence))
+                .orderByAsc(UserInbox::getSequence)
+                .last("LIMIT " + (limit + 1)));
+        boolean hasMore = rows.size() > limit;
+        if (hasMore) rows = new ArrayList<>(rows.subList(0, limit));
+        List<InboxEventResponse> items = new ArrayList<>(rows.size());
+        for (UserInbox inbox : rows) {
+            Event event = eventMapper.selectById(inbox.getEventId());
+            if (event == null) {
+                items.add(new InboxEventResponse(
+                        inbox.getId().toString(), inbox.getSequence(), inbox.getEventId().toString(),
+                        -1, "0", Map.of("available", false), toEpochMilli(inbox.getCreatedTime())));
+                continue;
+            }
+            items.add(new InboxEventResponse(
+                    inbox.getId().toString(),
+                    inbox.getSequence(),
+                    event.getId().toString(),
+                    event.getEventType(),
+                    event.getReferenceId().toString(),
+                    resolvePayload(userId, event),
+                    toEpochMilli(event.getCreatedTime())));
+        }
+        long lastSequence = items.isEmpty() ? Math.max(0, afterSequence) : items.get(items.size() - 1).sequence();
+        return new InboxSyncResponse(items, lastSequence, hasMore);
+    }
+
+    private Object resolvePayload(long userId, Event event) {
+        if (event.getEventType() == 0 || event.getEventType() == 1) {
+            Message message = messageMapper.selectById(event.getReferenceId());
+            if (message != null) return MessageResponse.from(message);
+        } else if (event.getEventType() == 2 || event.getEventType() == 3) {
+            FriendAddRequest request = friendRequestMapper.selectById(event.getReferenceId());
+            if (request != null) {
+                long otherUserId = request.getSenderId() == userId ? request.getReceiverId() : request.getSenderId();
+                User otherUser = userMapper.selectById(otherUserId);
+                if (otherUser != null) return FriendRequestResponse.from(request, otherUser, userId);
+            }
+        } else if (event.getEventType() == 4 || event.getEventType() == 5) {
+            GroupJoinRequest request = groupRequestMapper.selectById(event.getReferenceId());
+            if (request != null) {
+                Group group = groupMapper.selectById(request.getGroupId());
+                User applicant = userMapper.selectById(request.getUserId());
+                if (group != null && applicant != null) return GroupJoinRequestResponse.from(request, group, applicant);
+            }
+        }
+        Map<String, Object> fallback = new LinkedHashMap<>();
+        fallback.put("referenceId", event.getReferenceId().toString());
+        fallback.put("available", false);
+        return fallback;
+    }
+}

@@ -19,9 +19,23 @@ export const useChatStore = defineStore('chat', () => {
     const conversation = conversations.value.find((item) => item.id === id)
     if (conversation) conversation.unread = 0
   }
+  function replaceConversations(items: Conversation[]) {
+    conversations.value = items
+    for (const item of items) messagesByConversation.value[item.id] ??= []
+    if (!items.some((item) => item.id === currentConversationId.value)) currentConversationId.value = items[0]?.id ?? ''
+  }
+  function removeConversation(id: string) {
+    conversations.value = conversations.value.filter((item) => item.id !== id)
+    if (currentConversationId.value === id) currentConversationId.value = conversations.value[0]?.id ?? ''
+  }
   function appendMessage(message: Message) {
     messagesByConversation.value[message.conversationId] ??= []
-    messagesByConversation.value[message.conversationId].push(message)
+    const messages = messagesByConversation.value[message.conversationId]
+    const index = messages.findIndex((item) =>
+      item.id === message.id
+      || Boolean(message.clientMessageId && item.clientMessageId === message.clientMessageId))
+    if (index >= 0) messages[index] = { ...messages[index], ...message }
+    else messages.push(message)
     const conversation = conversations.value.find((item) => item.id === message.conversationId)
     if (conversation) {
       conversation.preview = message.type === 'text'
@@ -34,9 +48,21 @@ export const useChatStore = defineStore('chat', () => {
       conversation.time = '刚刚'
     }
   }
+  function markMessageFailed(clientMessageId: string) {
+    for (const messages of Object.values(messagesByConversation.value)) {
+      const message = messages.find((item) => item.clientMessageId === clientMessageId)
+      if (message) message.sendStatus = 'failed'
+    }
+  }
   function addConversation(conversation: Conversation) {
     if (!conversations.value.some((item) => item.id === conversation.id)) conversations.value.unshift(conversation)
     messagesByConversation.value[conversation.id] ??= []
   }
-  return { conversations, messagesByConversation, currentConversationId, currentConversation, currentMessages, setData, selectConversation, appendMessage, addConversation }
+  function setConversationMessages(conversationId: string, messages: Message[]) { messagesByConversation.value[conversationId] = messages }
+  function reset() {
+    conversations.value = []
+    messagesByConversation.value = {}
+    currentConversationId.value = ''
+  }
+  return { conversations, messagesByConversation, currentConversationId, currentConversation, currentMessages, setData, selectConversation, replaceConversations, removeConversation, appendMessage, markMessageFailed, addConversation, setConversationMessages, reset }
 })

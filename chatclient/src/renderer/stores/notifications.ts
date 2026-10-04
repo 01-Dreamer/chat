@@ -10,5 +10,6 @@ export const useNotificationsStore = defineStore('notifications', () => {
     const item = notifications.value.find((notification) => notification.id === id)
     if (item) item.read = true
   }
-  return { notifications, unreadCount, setData, markRead }
+  function reset() { notifications.value = [] }
+  return { notifications, unreadCount, setData, markRead, reset }
 })

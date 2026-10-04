@@ -51,6 +51,22 @@ CREATE TABLE friend_add_request (
   COLLATE=utf8mb4_unicode_ci
   COMMENT='好友申请表';
 
+CREATE TABLE friend_delete_record (
+    id BIGINT NOT NULL COMMENT '好友删除记录ID',
+    operator_id BIGINT NOT NULL COMMENT '删除操作人用户ID',
+    friend_id BIGINT NOT NULL COMMENT '被删除好友用户ID',
+    created_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    PRIMARY KEY (id),
+    KEY idx_operator_id (operator_id),
+    KEY idx_friend_id (friend_id)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci
+  COMMENT='好友删除记录表';
+
 CREATE TABLE `group` (
     id BIGINT NOT NULL COMMENT '群聊ID',
     name VARCHAR(64) NOT NULL COMMENT '群聊名称',
@@ -68,23 +84,22 @@ CREATE TABLE `group` (
   COLLATE=utf8mb4_unicode_ci
   COMMENT='群聊表';
 
-CREATE TABLE group_change_log (
-    id BIGINT NOT NULL COMMENT '群变更记录ID',
+CREATE TABLE user_group_setting (
+    id BIGINT NOT NULL COMMENT '用户群聊设置ID',
+    user_id BIGINT NOT NULL COMMENT '用户ID',
     group_id BIGINT NOT NULL COMMENT '群聊ID',
-    version BIGINT NOT NULL COMMENT '群数据版本号',
-    change_type TINYINT NOT NULL COMMENT '变更类型：0-群资料修改，1-成员加入，2-成员修改，3-成员退出',
-    user_id BIGINT DEFAULT NULL COMMENT '发生变化的成员用户ID',
+    remark VARCHAR(64) DEFAULT NULL COMMENT '用户对群聊的备注',
     created_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     updated_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
         ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
 
     PRIMARY KEY (id),
-    UNIQUE KEY uk_group_version (group_id, version),
+    UNIQUE KEY uk_user_group (user_id, group_id),
     KEY idx_group_id (group_id)
 ) ENGINE=InnoDB
   DEFAULT CHARSET=utf8mb4
   COLLATE=utf8mb4_unicode_ci
-  COMMENT='群聊变更记录表';
+  COMMENT='用户群聊设置表';
 
 CREATE TABLE group_member (
     id BIGINT NOT NULL COMMENT '群成员关系ID',
@@ -92,7 +107,6 @@ CREATE TABLE group_member (
     user_id BIGINT NOT NULL COMMENT '用户ID',
     role TINYINT NOT NULL DEFAULT 0 COMMENT '角色：0-普通成员，1-管理员，2-群主',
     nickname VARCHAR(64) DEFAULT NULL COMMENT '群内昵称',
-    remark VARCHAR(64) DEFAULT NULL COMMENT '群聊备注',
     created_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '加入群聊时间',
     updated_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
         ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
@@ -124,6 +138,24 @@ CREATE TABLE group_join_request (
   COLLATE=utf8mb4_unicode_ci
   COMMENT='群聊加入申请表';
 
+CREATE TABLE group_leave_record (
+    id BIGINT NOT NULL COMMENT '群成员退出记录ID',
+    group_id BIGINT NOT NULL COMMENT '群聊ID',
+    user_id BIGINT NOT NULL COMMENT '退出群聊的用户ID',
+    operator_id BIGINT NOT NULL COMMENT '操作人用户ID',
+    created_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    PRIMARY KEY (id),
+    KEY idx_group_id (group_id),
+    KEY idx_user_id (user_id),
+    KEY idx_operator_id (operator_id)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci
+  COMMENT='群成员退出记录表';
+
 CREATE TABLE `message` (
     id BIGINT NOT NULL COMMENT '消息ID',
     client_message_id VARCHAR(64) NOT NULL COMMENT '客户端消息唯一ID',
@@ -134,7 +166,9 @@ CREATE TABLE `message` (
     message_type TINYINT NOT NULL COMMENT '消息类型：0-文本，1-文件，2-红包，3-音视频通话提示',
     content TEXT DEFAULT NULL COMMENT '文本消息内容',
     reference_id BIGINT DEFAULT NULL COMMENT '关联业务ID',
+    reply_message_id BIGINT DEFAULT NULL COMMENT '引用的消息ID',
     status TINYINT NOT NULL DEFAULT 0 COMMENT '消息状态：0-正常，1-已撤回',
+    recall_operator_id BIGINT DEFAULT NULL COMMENT '撤回操作者用户ID',
     recalled_time DATETIME DEFAULT NULL COMMENT '撤回时间',
     created_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     updated_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -170,6 +204,21 @@ CREATE TABLE file_resource (
   DEFAULT CHARSET=utf8mb4
   COLLATE=utf8mb4_unicode_ci
   COMMENT='文件资源表';
+
+CREATE TABLE file_resource_access (
+    id BIGINT NOT NULL COMMENT '资源授权ID',
+    resource_id BIGINT NOT NULL COMMENT '文件资源ID',
+    user_id BIGINT NOT NULL COMMENT '获授权用户ID',
+    created_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '授权时间',
+    updated_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_resource_user (resource_id, user_id),
+    KEY idx_user_id (user_id)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci
+  COMMENT='文件资源用户授权表';
 
 CREATE TABLE call_record (
     id BIGINT NOT NULL COMMENT '通话记录ID',
@@ -209,6 +258,27 @@ CREATE TABLE `account` (
   DEFAULT CHARSET=utf8mb4
   COLLATE=utf8mb4_unicode_ci
   COMMENT='用户账户表';
+
+CREATE TABLE account_transaction (
+    id BIGINT NOT NULL COMMENT '资金流水ID',
+    client_transaction_id VARCHAR(64) DEFAULT NULL COMMENT '客户端幂等ID',
+    from_user_id BIGINT DEFAULT NULL COMMENT '出账用户ID',
+    to_user_id BIGINT DEFAULT NULL COMMENT '入账用户ID',
+    transaction_type TINYINT NOT NULL COMMENT '类型：0-转账，1-发红包，2-领红包，3-红包退款',
+    amount DECIMAL(12,2) NOT NULL COMMENT '金额',
+    reference_id BIGINT DEFAULT NULL COMMENT '关联业务ID',
+    status TINYINT NOT NULL DEFAULT 1 COMMENT '状态：0-处理中，1-成功，2-失败',
+    created_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_from_client (from_user_id, client_transaction_id),
+    KEY idx_to_user_time (to_user_id, created_time),
+    KEY idx_reference (reference_id)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci
+  COMMENT='账户资金流水表';
 
 CREATE TABLE red_packet (
     id BIGINT NOT NULL COMMENT '红包ID',
@@ -271,3 +341,37 @@ CREATE TABLE `notification` (
   DEFAULT CHARSET=utf8mb4
   COLLATE=utf8mb4_unicode_ci
   COMMENT='通知表';
+
+CREATE TABLE `event` (
+    id BIGINT NOT NULL COMMENT '事件ID',
+    event_type TINYINT NOT NULL COMMENT '事件类型：0-消息发送，1-消息撤回，2-好友申请，3-好友申请处理，4-入群申请，5-入群申请处理',
+    reference_id BIGINT NOT NULL COMMENT '关联业务记录ID',
+    created_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_type_reference (event_type, reference_id),
+    KEY idx_created_time (created_time)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci
+  COMMENT='系统事件表';
+
+CREATE TABLE user_inbox (
+    id BIGINT NOT NULL COMMENT '用户信箱记录ID',
+    user_id BIGINT NOT NULL COMMENT '接收用户ID',
+    event_id BIGINT NOT NULL COMMENT '事件ID',
+    sequence BIGINT NOT NULL COMMENT '用户信箱序列号',
+    created_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_user_event (user_id, event_id),
+    UNIQUE KEY uk_user_sequence (user_id, sequence),
+    KEY idx_event_id (event_id)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci
+  COMMENT='用户事件信箱表';

@@ -1,0 +1,14 @@
+{
+    "configurations": [
+        {
+            "type": "java",
+            "name": "Spring Boot-ChatserverApplication<chatserver>",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "mainClass": "top.zxylearn.chatserver.ChatserverApplication",
+            "projectName": "chatserver",
+            "args": "",
+            "envFile": "${workspaceFolder}/.env"
+        }
+    ]
+}

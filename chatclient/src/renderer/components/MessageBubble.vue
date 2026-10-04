@@ -1,91 +1,103 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { Document, Money, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import type { Message } from '../types'
+import AvatarDisplay from './AvatarDisplay.vue'
 
-const props = defineProps<{ message: Message; own: boolean }>()
+const props = defineProps<{ message: Message; own: boolean; canRecall: boolean; replyMessage?: Message }>()
+const emit = defineEmits<{ recall: [message: Message]; quote: [message: Message] }>()
 const showTranscript = ref(false)
+const translatedText = ref('')
+const translating = ref(false)
+const transcribing = ref(false)
 const voicePlaying = ref(false)
 const voiceUnread = ref(!props.own && props.message.read === false)
 const downloadingVideo = ref(false)
 const videoUrl = ref('')
+const resourceUrl = ref('')
+const contextMenuVisible = ref(false)
+const contextMenuX = ref(0)
+const contextMenuY = ref(0)
 let voiceTimer: number | undefined
+let audio: HTMLAudioElement | undefined
 
-function downloadDocument() {
-  if (!props.message.content) return
+async function openResource() {
+  if (!props.message.referenceId) return
+  const url = await window.chatApi.openFile(props.message.referenceId)
+  resourceUrl.value = url
+  return url
+}
+
+async function downloadDocument() {
+  const url = await openResource()
+  if (!url) return
   const anchor = document.createElement('a')
-  anchor.href = props.message.content
+  anchor.href = url
   anchor.download = props.message.fileName ?? '下载文件'
   anchor.click()
   ElMessage.success('文件已开始下载')
 }
 
-function playVoice() {
+async function playVoice() {
   voiceUnread.value = false
-  voicePlaying.value = true
-  window.clearTimeout(voiceTimer)
-  voiceTimer = window.setTimeout(() => { voicePlaying.value = false }, (props.message.duration ?? 1) * 1000)
+  try {
+    const url = await openResource()
+    if (!url) return
+    audio?.pause()
+    audio = new Audio(url)
+    voicePlaying.value = true
+    audio.onended = () => { voicePlaying.value = false }
+    await audio.play()
+  } catch (error) {
+    voicePlaying.value = false
+    ElMessage.error(error instanceof Error ? error.message : '语音播放失败')
+  }
 }
 
-function toggleTranscript() {
+async function toggleTranscript() {
   voiceUnread.value = false
-  showTranscript.value = !showTranscript.value
+  if (showTranscript.value) { showTranscript.value = false; return }
+  if (!props.message.transcript && props.message.referenceId) {
+    transcribing.value = true
+    try { props.message.transcript = await window.chatApi.transcribeVoice(props.message.referenceId) }
+    catch (error) { ElMessage.error(error instanceof Error ? error.message : '语音识别失败') }
+    finally { transcribing.value = false }
+  }
+  showTranscript.value = true
 }
 
-async function createMockVideo() {
-  const canvas = document.createElement('canvas')
-  canvas.width = 640
-  canvas.height = 360
-  const context = canvas.getContext('2d')
-  if (!context || typeof canvas.captureStream !== 'function' || typeof MediaRecorder === 'undefined') throw new Error('当前环境不支持视频预览')
+async function translate() {
+  if (translatedText.value) { translatedText.value = ''; return }
+  translating.value = true
+  try { translatedText.value = await window.chatApi.translateText(props.message.content) }
+  catch (error) { ElMessage.error(error instanceof Error ? error.message : '翻译失败') }
+  finally { translating.value = false }
+}
 
-  const stream = canvas.captureStream(24)
-  const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8') ? 'video/webm;codecs=vp8' : 'video/webm'
-  const recorder = new MediaRecorder(stream, { mimeType })
-  const chunks: BlobPart[] = []
-  recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data) }
-  const completed = new Promise<Blob>((resolve) => {
-    recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }))
-  })
+function openContextMenu(event: MouseEvent) {
+  if (props.message.status === 1 || props.message.id.startsWith('local:')) return
+  contextMenuX.value = Math.min(event.clientX, window.innerWidth - 126)
+  contextMenuY.value = Math.min(event.clientY, window.innerHeight - 126)
+  contextMenuVisible.value = true
+}
 
-  recorder.start()
-  const startedAt = performance.now()
-  await new Promise<void>((resolve) => {
-    const draw = (time: number) => {
-      const progress = Math.min((time - startedAt) / 2200, 1)
-      const gradient = context.createLinearGradient(0, 0, canvas.width, canvas.height)
-      gradient.addColorStop(0, '#415b78')
-      gradient.addColorStop(1, '#172333')
-      context.fillStyle = gradient
-      context.fillRect(0, 0, canvas.width, canvas.height)
-      context.fillStyle = 'rgba(7, 193, 96, .75)'
-      context.beginPath()
-      context.arc(110 + progress * 420, 180, 42, 0, Math.PI * 2)
-      context.fill()
-      context.fillStyle = '#ffffff'
-      context.font = '30px sans-serif'
-      context.fillText('ChatClient Mock Video', 155, 172)
-      context.font = '18px sans-serif'
-      context.fillStyle = 'rgba(255,255,255,.72)'
-      context.fillText('周会演示视频预览', 225, 210)
-      if (progress < 1) requestAnimationFrame(draw)
-      else resolve()
-    }
-    requestAnimationFrame(draw)
-  })
-  recorder.stop()
-  const blob = await completed
-  stream.getTracks().forEach((track) => track.stop())
-  return blob
+function closeContextMenu() {
+  contextMenuVisible.value = false
+}
+
+async function runContextAction(action: 'translate' | 'recall' | 'quote') {
+  closeContextMenu()
+  if (action === 'translate') await translate()
+  else if (action === 'recall') emit('recall', props.message)
+  else emit('quote', props.message)
 }
 
 async function downloadAndPlayVideo() {
   if (videoUrl.value || downloadingVideo.value) return
   downloadingVideo.value = true
   try {
-    const blob = await createMockVideo()
-    videoUrl.value = URL.createObjectURL(blob)
+    videoUrl.value = await openResource() ?? ''
     ElMessage.success('视频下载完成，可以播放')
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '视频下载失败')
@@ -96,20 +108,34 @@ async function downloadAndPlayVideo() {
 
 onBeforeUnmount(() => {
   window.clearTimeout(voiceTimer)
-  if (videoUrl.value) URL.revokeObjectURL(videoUrl.value)
+  audio?.pause()
+  document.removeEventListener('click', closeContextMenu)
+  window.removeEventListener('blur', closeContextMenu)
+})
+
+onMounted(() => {
+  if (props.message.fileKind === 'image') void openResource().catch(() => undefined)
+  document.addEventListener('click', closeContextMenu)
+  window.addEventListener('blur', closeContextMenu)
 })
 </script>
 
 <template>
   <div class="message-body" :class="{ 'self-message': own }">
-    <img :src="message.senderAvatar" alt="avatar" class="message-avatar" />
-    <div class="message-content">
+    <AvatarDisplay :src="message.senderAvatar" :name="message.senderName" :size="35" class="message-avatar" />
+    <div class="message-content" @contextmenu.prevent.stop="openContextMenu">
       <div v-if="!own" class="nickname">{{ message.senderName }}</div>
-      <div v-if="message.type === 'text'" class="text-msg">{{ message.content }}</div>
+      <div v-if="message.status === 1" class="text-msg recalled-message">该消息已撤回</div>
+      <template v-else-if="message.type === 'text'">
+        <div v-if="message.replyMessageId" class="quoted-message"><strong>{{ replyMessage?.senderName || '引用消息' }}</strong><span>{{ replyMessage?.content || '原消息暂不可用' }}</span></div>
+        <div class="text-msg">{{ message.content }}</div>
+        <div v-if="translating" class="translation-loading">翻译中…</div>
+        <div v-if="translatedText" class="voice-transcript">{{ translatedText }}</div>
+      </template>
 
       <template v-else-if="message.type === 'file'">
         <div v-if="message.fileKind === 'image'" class="img-msg">
-          <img :src="message.content" :alt="message.fileName || '聊天图片'" class="image-content" />
+          <img :src="resourceUrl" :alt="message.fileName || '聊天图片'" class="image-content" />
         </div>
         <div v-else-if="message.fileKind === 'video'" class="video-msg">
           <video v-if="videoUrl" :src="videoUrl" class="video-player" controls autoplay muted />
@@ -126,7 +152,7 @@ onBeforeUnmount(() => {
         </button>
       </template>
 
-      <div v-else-if="message.type === 'red_packet'" class="money-msg"><el-icon :size="32"><Money /></el-icon><div class="money-details"><strong>¥ {{ message.amount?.toFixed(2) }}</strong><span>{{ message.content || '红包' }}</span></div></div>
+      <button v-else-if="message.type === 'red_packet'" class="money-msg" @click="message.referenceId && window.chatApi.claimRedPacket(message.referenceId).then((result) => ElMessage.success(result.alreadyReceived ? `已领取 ¥${result.amount}` : `领取成功 ¥${result.amount}`)).catch((error) => ElMessage.error(error instanceof Error ? error.message : '领取失败'))"><el-icon :size="32"><Money /></el-icon><div class="money-details"><strong>¥ {{ message.amount || '--' }}</strong><span>{{ message.content || '红包' }}</span></div></button>
 
       <template v-else-if="message.type === 'voice'">
         <div class="voice-line">
@@ -135,10 +161,17 @@ onBeforeUnmount(() => {
             <span>{{ message.duration }}&quot;</span>
           </button>
           <i v-if="voiceUnread" class="voice-unread" />
-          <button class="voice-to-text" @click.stop="toggleTranscript">{{ showTranscript ? '收起' : '转文字' }}</button>
+          <button class="voice-to-text" :disabled="transcribing" @click.stop="toggleTranscript">{{ transcribing ? '识别中…' : showTranscript ? '收起' : '转文字' }}</button>
         </div>
         <div v-if="showTranscript" class="voice-transcript">{{ message.transcript || '暂时无法识别该语音消息' }}</div>
       </template>
     </div>
+    <Teleport to="body">
+      <div v-if="contextMenuVisible" class="message-context-menu no-drag" :style="{ left: `${contextMenuX}px`, top: `${contextMenuY}px` }" @click.stop @contextmenu.prevent>
+        <button v-if="message.type === 'text'" :disabled="translating" @click="runContextAction('translate')">{{ translatedText ? '收起翻译' : '翻译' }}</button>
+        <button v-if="canRecall" @click="runContextAction('recall')">撤回</button>
+        <button @click="runContextAction('quote')">引用</button>
+      </div>
+    </Teleport>
   </div>
 </template>

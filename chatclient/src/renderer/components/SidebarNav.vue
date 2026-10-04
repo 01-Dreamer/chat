@@ -2,6 +2,7 @@
 import { Bell, ChatDotRound, Setting, User } from '@element-plus/icons-vue'
 import { useAppStore } from '../stores/app'
 import { useNotificationsStore } from '../stores/notifications'
+import AvatarDisplay from './AvatarDisplay.vue'
 
 const appStore = useAppStore()
 const notificationsStore = useNotificationsStore()
@@ -9,7 +10,7 @@ const notificationsStore = useNotificationsStore()
 
 <template>
   <aside class="sidebar-nav drag-region">
-    <div class="sidebar-top"><img class="self-avatar no-drag" :src="appStore.currentUser?.avatar" alt="avatar" /></div>
+    <div class="sidebar-top"><AvatarDisplay class="self-avatar no-drag" :src="appStore.currentUser?.avatar" :name="appStore.currentUser?.nickname" :size="38" /></div>
     <nav class="sidebar-middle">
       <button class="sidebar-item" :class="{ active: appStore.activeModule === 'chat' }" title="聊天" @click="appStore.setModule('chat')"><el-icon><ChatDotRound /></el-icon></button>
       <button class="sidebar-item" :class="{ active: appStore.activeModule === 'contacts' }" title="通讯录" @click="appStore.setModule('contacts')"><el-icon><User /></el-icon></button>

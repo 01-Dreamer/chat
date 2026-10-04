@@ -13,11 +13,18 @@ export const useAppStore = defineStore('app', () => {
   const isAuthenticated = computed(() => Boolean(currentUser.value))
 
   function setUser(user: User) { currentUser.value = user }
+  function clearSession() {
+    currentUser.value = null
+    activeModule.value = 'chat'
+    ready.value = false
+    showSettings.value = false
+    showNotifications.value = false
+  }
   function setModule(module: AppModule) { activeModule.value = module }
   function openSettings() { showSettings.value = true }
   function closeSettings() { showSettings.value = false }
   function openNotifications() { showNotifications.value = true }
   function closeNotifications() { showNotifications.value = false }
 
-  return { currentUser, activeModule, ready, showSettings, showNotifications, isAuthenticated, setUser, setModule, openSettings, closeSettings, openNotifications, closeNotifications }
+  return { currentUser, activeModule, ready, showSettings, showNotifications, isAuthenticated, setUser, clearSession, setModule, openSettings, closeSettings, openNotifications, closeNotifications }
 })
