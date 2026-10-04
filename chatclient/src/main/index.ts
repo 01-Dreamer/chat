@@ -1,9 +1,24 @@
 import { app, BrowserWindow, ipcMain, screen, type Rectangle } from 'electron'
 import { join } from 'node:path'
-import { mockService } from './services/mockService'
+import type { IpcResult } from './types'
+import { databaseManager } from './database/databaseManager'
+import { authService } from './services/authService'
+import { friendService } from './services/friendService'
+import { groupService } from './services/groupService'
+import { messageService } from './services/messageService'
+import { notificationService } from './services/notificationService'
+import { profileService } from './services/profileService'
+import { realtimeService } from './services/realtimeService'
+import { fileService } from './services/fileService'
+import { walletService } from './services/walletService'
+import { aiService } from './services/aiService'
+import { callService } from './services/callService'
+import { avatarCacheService } from './services/avatarCacheService'
 
 let mainWindow: BrowserWindow | null = null
 let minimizedBounds: Rectangle | null = null
+let quittingAfterLogout = false
+let logoutInProgress = false
 
 const windowSizes = {
   login: { width: 300, height: 270 },
@@ -16,23 +31,133 @@ if (process.env.CHATCLIENT_DEV === '1') {
 }
 
 function registerIpc() {
-  ipcMain.handle('auth:login', (_event, username: string, password: string) => mockService.login(username, password))
-  ipcMain.handle('auth:register', (_event, nickname: string, username: string, password: string) => mockService.register(nickname, username, password))
-  ipcMain.handle('app:bootstrap', () => mockService.bootstrap())
-  ipcMain.handle('chat:sendMessage', (_event, message) => mockService.sendMessage(message))
-  ipcMain.handle('profile:update', (_event, patch) => mockService.updateProfile(patch))
-  ipcMain.handle('profile:resetTransferPassword', (_event, oldPassword: string, newPassword: string) => mockService.resetTransferPassword(oldPassword, newPassword))
-  ipcMain.handle('contacts:acceptRequest', (_event, id: string) => mockService.acceptFriendRequest(id))
-  ipcMain.handle('contacts:rejectRequest', (_event, id: string) => mockService.rejectFriendRequest(id))
-  ipcMain.handle('contacts:updateRemark', (_event, kind: 'friend' | 'group', id: string, remark: string) => mockService.updateContactRemark(kind, id, remark))
-  ipcMain.handle('contacts:searchFriend', (_event, username: string) => mockService.searchFriendByUsername(username))
-  ipcMain.handle('contacts:applyFriend', (_event, username: string, reason: string) => mockService.applyAddFriend(username, reason))
-  ipcMain.handle('contacts:searchGroup', (_event, groupNumber: string) => mockService.searchGroupByNumber(groupNumber))
-  ipcMain.handle('contacts:applyGroup', (_event, groupNumber: string, reason: string) => mockService.applyJoinGroup(groupNumber, reason))
-  ipcMain.handle('contacts:addFriend', (_event, username: string) => mockService.addFriendByUsername(username))
-  ipcMain.handle('contacts:joinGroup', (_event, groupNumber: string) => mockService.joinGroupByNumber(groupNumber))
-  ipcMain.handle('contacts:createGroup', (_event, name: string) => mockService.createGroup(name))
-  ipcMain.handle('notifications:markRead', (_event, id: string) => mockService.markNotificationRead(id))
+  ipcMain.handle('auth:login', (_event, username: string, password: string) => asIpcResult(async () => {
+    const user = await authService.login(username, password)
+    initializeUserDatabase(user)
+    avatarCacheService.cacheCurrentUser(user)
+    realtimeService.connect(user.id)
+    return user
+  }))
+  ipcMain.handle('auth:register', (_event, nickname: string, username: string, password: string) => asIpcResult(async () => {
+    const user = await authService.register(nickname, username, password)
+    initializeUserDatabase(user)
+    avatarCacheService.cacheCurrentUser(user)
+    realtimeService.connect(user.id)
+    return user
+  }))
+  ipcMain.handle('auth:logout', () => asIpcResult(async () => {
+    realtimeService.disconnect()
+    try {
+      await authService.logout()
+    } finally {
+      databaseManager.close()
+    }
+    return true
+  }))
+  ipcMain.handle('app:bootstrap', async () => {
+    const user = await authService.refreshCurrentUser()
+    initializeUserDatabase(user)
+    avatarCacheService.cacheCurrentUser(user)
+    const [friendData, groupData, notifications] = await Promise.all([
+      friendService.loadAndSync().catch(() => ({ friends: databaseManager.loadCachedFriends(), requests: databaseManager.loadCachedFriendRequests() })),
+      groupService.loadAndSync(user.id).catch(() => ({ groups: databaseManager.loadCachedGroups(), requests: [] })),
+      notificationService.list().catch(() => databaseManager.loadCachedNotifications()),
+    ])
+    realtimeService.connect(user.id)
+    const chatData = databaseManager.loadChatState()
+    return {
+      user: { ...user, avatar: databaseManager.getDisplayAvatar('user', user.id) ?? user.avatar },
+      friends: friendData.friends,
+      friendRequests: [...friendData.requests, ...groupData.requests],
+      groups: groupData.groups,
+      conversations: chatData.conversations,
+      messages: chatData.messages,
+      notifications,
+    }
+  })
+  ipcMain.handle('sessions:localState', () => databaseManager.loadChatState())
+  ipcMain.handle('sessions:setPinned', (_event, chatKey: string, pinned: boolean) => {
+    databaseManager.setSessionPinned(chatKey, pinned)
+    return databaseManager.loadConversations()
+  })
+  ipcMain.handle('sessions:markRead', (_event, chatKey: string) => databaseManager.markSessionRead(chatKey))
+  ipcMain.handle('sessions:hide', (_event, chatKey: string) => databaseManager.hideSession(chatKey))
+  ipcMain.handle('chat:sendMessage', (_event, message) => messageService.sendText(message))
+  ipcMain.handle('chat:selectAndSendFile', async (_event, conversationId: string, resourceType?: number) => {
+    const resource = await fileService.selectAndUpload(resourceType)
+    return resource ? messageService.sendFile(conversationId, resource) : null
+  })
+  ipcMain.handle('chat:captureAndSend', async (_event, conversationId: string) => {
+    const resource = await fileService.captureScreen()
+    return messageService.sendFile(conversationId, resource)
+  })
+  ipcMain.handle('files:open', (_event, resourceId: string) => fileService.openResource(resourceId))
+  ipcMain.handle('chat:openConversation', (_event, type: 'direct' | 'group', targetId: string) => messageService.openConversation(type, targetId))
+  ipcMain.handle('chat:recall', (_event, messageId: string) => messageService.recall(messageId))
+  ipcMain.handle('profile:update', (_event, patch) => profileService.update(patch))
+  ipcMain.handle('profile:updateAvatar', async () => {
+    const resource = await fileService.selectAndUpload(0)
+    return resource ? profileService.updateAvatar(resource.id) : null
+  })
+  ipcMain.handle('profile:resetTransferPassword', (_event, oldPassword: string, newPassword: string) => walletService.setPayPassword(oldPassword, newPassword))
+  ipcMain.handle('wallet:account', () => walletService.account())
+  ipcMain.handle('wallet:transfer', (_event, recipientUserId: string, amount: string, payPassword: string) => walletService.transfer(recipientUserId, amount, payPassword))
+  ipcMain.handle('wallet:sendRedPacket', async (_event, conversationId: string, input) => {
+    const packet = await walletService.createRedPacket(input)
+    databaseManager.upsertRedPacket(packet)
+    return messageService.sendRedPacket(conversationId, packet)
+  })
+  ipcMain.handle('wallet:claimRedPacket', async (_event, packetId: string) => {
+    const result = await walletService.claim(packetId)
+    databaseManager.upsertRedPacket(result.redPacket)
+    return result
+  })
+  ipcMain.handle('ai:translate', (_event, text: string, targetLanguage?: string) => aiService.translate(text, targetLanguage))
+  ipcMain.handle('ai:smartReplies', (_event, messages) => aiService.smartReplies(messages))
+  ipcMain.handle('asr:transcribe', (_event, resourceId: string) => aiService.transcribe(resourceId))
+  ipcMain.handle('calls:create', (_event, calleeId: string, callType: number) => callService.create(calleeId, callType))
+  ipcMain.handle('calls:update', (_event, callId: string, action) => callService.update(callId, action))
+  ipcMain.handle('calls:iceServers', () => callService.iceServers())
+  ipcMain.handle('calls:signal', (_event, callId: string, targetUserId: string, signalType, payload) => callService.signal(callId, targetUserId, signalType, payload))
+  ipcMain.handle('contacts:acceptRequest', (_event, id: string, type: 'friend' | 'group') => type === 'group'
+    ? groupService.accept(id, authService.getCurrentUserId())
+    : friendService.accept(id))
+  ipcMain.handle('contacts:rejectRequest', (_event, id: string, type: 'friend' | 'group') => type === 'group'
+    ? groupService.reject(id, authService.getCurrentUserId())
+    : friendService.reject(id))
+  ipcMain.handle('contacts:updateRemark', (_event, kind: 'friend' | 'group', id: string, remark: string) => kind === 'friend' ? friendService.updateRemark(id, remark) : groupService.updateRemark(id, remark))
+  ipcMain.handle('contacts:searchFriend', (_event, username: string) => friendService.search(username))
+  ipcMain.handle('contacts:applyFriend', (_event, username: string, reason: string) => friendService.apply(username, reason))
+  ipcMain.handle('contacts:listFriends', () => friendService.listFriends())
+  ipcMain.handle('contacts:deleteFriend', (_event, id: string) => friendService.delete(id))
+  ipcMain.handle('contacts:searchGroup', (_event, groupNumber: string) => groupService.search(groupNumber))
+  ipcMain.handle('contacts:applyGroup', (_event, groupNumber: string, reason: string) => groupService.apply(groupNumber, reason, authService.getCurrentUserId()))
+  ipcMain.handle('contacts:listGroups', () => groupService.listGroups())
+  ipcMain.handle('contacts:listGroupMembers', (_event, groupId: string) => groupService.listMembers(groupId))
+  ipcMain.handle('groups:updateProfile', (_event, groupId: string, name: string) => groupService.updateProfile(groupId, name))
+  ipcMain.handle('groups:updateAvatar', async (_event, groupId: string) => {
+    const resource = await fileService.selectAndUpload(0)
+    return resource ? groupService.updateAvatar(groupId, resource.id) : null
+  })
+  ipcMain.handle('groups:updateMyNickname', (_event, groupId: string, value: string) => groupService.updateMyNickname(groupId, value))
+  ipcMain.handle('groups:updateRole', (_event, groupId: string, userId: string, role: number) => groupService.updateRole(groupId, userId, role))
+  ipcMain.handle('groups:kick', (_event, groupId: string, userId: string) => groupService.kick(groupId, userId))
+  ipcMain.handle('groups:leave', (_event, groupId: string) => groupService.leave(groupId))
+  ipcMain.handle('groups:dissolve', (_event, groupId: string) => groupService.dissolve(groupId))
+  ipcMain.handle('contacts:createGroup', (_event, name: string) => groupService.create(name))
+  ipcMain.handle('contacts:refresh', async () => {
+    const currentUserId = authService.getCurrentUserId()
+    const [friendData, groupData] = await Promise.all([
+      friendService.loadAndSync(),
+      groupService.loadAndSync(currentUserId),
+    ])
+    return {
+      friends: friendData.friends,
+      friendRequests: [...friendData.requests, ...groupData.requests],
+      groups: groupData.groups,
+    }
+  })
+  ipcMain.handle('notifications:markRead', (_event, id: string) => notificationService.markRead(id))
   ipcMain.on('window:setMode', (event, mode: keyof typeof windowSizes) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     const size = windowSizes[mode] ?? windowSizes.main
@@ -63,12 +188,38 @@ function registerIpc() {
   ipcMain.handle('window:close', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win || win.isDestroyed()) return false
-    // Let the invoke response reach the renderer before its webContents is destroyed.
-    setTimeout(() => {
-      if (!win.isDestroyed()) win.close()
-    }, 0)
+    // Let the invoke response reach the renderer before logout closes the process.
+    setTimeout(() => void logoutAndQuit(), 0)
     return true
   })
+}
+
+async function logoutAndQuit() {
+  if (quittingAfterLogout || logoutInProgress) return
+  logoutInProgress = true
+  realtimeService.disconnect()
+  try {
+    if (authService.hasActiveSession()) await authService.logout()
+  } catch {
+    // Local credentials must still be discarded and the application must exit.
+  } finally {
+    databaseManager.close()
+    quittingAfterLogout = true
+    app.quit()
+  }
+}
+
+function initializeUserDatabase(user: import('./types').User) {
+  databaseManager.openForUser(user.id)
+  databaseManager.upsertCurrentUser(user)
+}
+
+async function asIpcResult<T>(action: () => Promise<T>): Promise<IpcResult<T>> {
+  try {
+    return { ok: true, data: await action() }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : '操作失败' }
+  }
 }
 
 function createWindow() {
@@ -98,6 +249,11 @@ function createWindow() {
     mainWindow?.center()
     mainWindow?.show()
   })
+  mainWindow.on('close', (event) => {
+    if (quittingAfterLogout) return
+    event.preventDefault()
+    void logoutAndQuit()
+  })
   mainWindow.on('restore', () => {
     if (minimizedBounds && mainWindow && !mainWindow.isDestroyed() && !mainWindow.isFullScreen()) {
       mainWindow.setBounds(minimizedBounds, false)
@@ -107,6 +263,9 @@ function createWindow() {
   mainWindow.on('maximize', () => mainWindow?.webContents.send('window:maximizedChanged', true))
   mainWindow.on('unmaximize', () => mainWindow?.webContents.send('window:maximizedChanged', false))
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  realtimeService.setEventSink((event) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('chat:event', event)
+  })
 
   if (process.env.ELECTRON_RENDERER_URL) {
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
@@ -115,7 +274,8 @@ function createWindow() {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  await authService.startFreshSession()
   registerIpc()
   createWindow()
   app.on('activate', () => {
@@ -125,4 +285,9 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('before-quit', () => {
+  realtimeService.disconnect()
+  databaseManager.close()
 })

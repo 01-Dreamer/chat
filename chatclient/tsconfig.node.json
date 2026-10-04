@@ -4,6 +4,7 @@
     "skipLibCheck": true,
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "target": "ES2022",
     "allowSyntheticDefaultImports": true,
     "strict": true,
     "types": ["node", "electron-vite/node"]
