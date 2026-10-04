@@ -1,4 +1,5 @@
 import axios, { AxiosError, type AxiosInstance } from 'axios'
+import { clientConfig } from '../config'
 
 interface ApiEnvelope<T> {
   code: string
@@ -33,15 +34,9 @@ class TokenStore {
 
 const tokenStore = new TokenStore()
 
-function getPositiveNumber(value: string | undefined, fallback: number) {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
-}
-
-function normalizeBaseUrl(value: string | undefined) {
-  const configured = value?.trim()
-  if (!configured) throw new Error('缺少 API_BASE_URL 环境配置')
-  return configured.replace(/\/+$/, '')
+export function isOfflineError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? '')
+  return message.includes('无法连接服务器') || message.includes('请求超时')
 }
 
 class ApiClient {
@@ -49,8 +44,8 @@ class ApiClient {
 
   constructor() {
     this.client = axios.create({
-      baseURL: `${normalizeBaseUrl(process.env.API_BASE_URL)}/api`,
-      timeout: getPositiveNumber(process.env.HTTP_TIMEOUT_MS, 10_000),
+      baseURL: `${clientConfig.apiBaseUrl}/api`,
+      timeout: clientConfig.httpTimeoutMs,
       headers: { 'Content-Type': 'application/json' },
     })
     this.client.interceptors.request.use((config) => {

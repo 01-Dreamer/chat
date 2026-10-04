@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { IpcResult, Message, PendingAttachment, ProfilePatch } from '../main/types'
+import type { IpcResult, Message, MessagePageCursor, PendingAttachment, ProfilePatch } from '../main/types'
 
 async function invokeAuth<T>(channel: string, ...args: unknown[]): Promise<T> {
   const result = await ipcRenderer.invoke(channel, ...args) as IpcResult<T>
@@ -33,7 +33,7 @@ const api = {
   logout: () => invokeAuth<boolean>('auth:logout'),
   bootstrap: () => invokeRemote('app:bootstrap'),
   loadLocalChatState: () => invokeRemote('sessions:localState'),
-  loadConversationMessages: (chatKey: string) => invokeRemote('sessions:messages', chatKey),
+  loadConversationMessages: (chatKey: string, cursor: MessagePageCursor | null = null, pageSize = 50) => invokeRemote('sessions:messages', chatKey, cursor, pageSize),
   setSessionPinned: (chatKey: string, pinned: boolean) => invokeRemote('sessions:setPinned', chatKey, pinned),
   markSessionRead: (chatKey: string) => invokeRemote('sessions:markRead', chatKey),
   setActiveSession: (chatKey: string | null) => invokeRemote('sessions:setActive', chatKey),
@@ -61,9 +61,8 @@ const api = {
   retryMessage: (clientMessageId: string) => invokeRemote('chat:retry', clientMessageId),
   updateProfile: (patch: ProfilePatch) => invokeRemote('profile:update', patch),
   updateAvatar: () => invokeRemote('profile:updateAvatar'),
-  resetTransferPassword: (oldPassword: string, newPassword: string) => invokeRemote('profile:resetTransferPassword', oldPassword, newPassword),
+  resetPayPassword: (oldPassword: string, newPassword: string) => invokeRemote('profile:resetPayPassword', oldPassword, newPassword),
   getWallet: () => invokeRemote('wallet:account'),
-  transfer: (recipientUserId: string, amount: string, payPassword: string) => invokeRemote('wallet:transfer', recipientUserId, amount, payPassword),
   sendRedPacket: (conversationId: string, input: unknown) => invokeRemote('wallet:sendRedPacket', conversationId, input),
   claimRedPacket: (packetId: string) => invokeRemote('wallet:claimRedPacket', packetId),
   translateText: (value: string, targetLanguage?: string) => invokeRemote('ai:translate', value, targetLanguage),
@@ -71,6 +70,7 @@ const api = {
   transcribeVoice: (resourceId: string) => invokeRemote('asr:transcribe', resourceId),
   createCall: (calleeId: string, callType: number) => invokeRemote('calls:create', calleeId, callType),
   updateCall: (callId: string, action: string) => invokeRemote('calls:update', callId, action),
+  getCall: (callId: string) => invokeRemote('calls:get', callId),
   getIceServers: () => invokeRemote('calls:iceServers'),
   sendCallSignal: (callId: string, targetUserId: string, signalType: string, payload: unknown) => invokeRemote('calls:signal', callId, targetUserId, signalType, payload),
   acceptFriendRequest: (id: string, type: 'friend' | 'group') => invokeRemote('contacts:acceptRequest', id, type),
@@ -79,6 +79,7 @@ const api = {
   searchFriendByUsername: (username: string) => invokeRemote('contacts:searchFriend', username),
   applyAddFriend: (username: string, reason: string) => invokeRemote('contacts:applyFriend', username, reason),
   listFriends: () => invokeRemote('contacts:listFriends'),
+  listContactRequests: () => invokeRemote('contacts:listRequests'),
   deleteFriend: (id: string) => invokeRemote('contacts:deleteFriend', id),
   searchGroupByNumber: (groupNumber: string) => invokeRemote('contacts:searchGroup', groupNumber),
   applyJoinGroup: (groupNumber: string, reason: string) => invokeRemote('contacts:applyGroup', groupNumber, reason),
@@ -94,6 +95,8 @@ const api = {
   createGroup: (name: string) => invokeRemote('contacts:createGroup', name),
   refreshContacts: () => invokeRemote('contacts:refresh'),
   markNotificationRead: (id: string) => invokeRemote('notifications:markRead', id),
+  listNotifications: () => invokeRemote('notifications:list'),
+  copyText: (value: string) => invokeRemote('clipboard:writeText', value),
   setWindowMode: (mode: 'login' | 'register' | 'main') => ipcRenderer.send('window:setMode', mode),
   minimizeWindow: () => invokeRemote('window:minimize'),
   toggleMaximize: () => invokeRemote('window:toggleMaximize'),

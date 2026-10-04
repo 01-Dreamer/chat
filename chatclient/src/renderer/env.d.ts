@@ -1,4 +1,4 @@
-import type { BootstrapData, CallRecord, Conversation, Friend, FriendRequest, GroupActionResult, GroupChat, GroupMember, Message, OpenConversationResult, PendingAttachment, ProfilePatch, TransferResult, User, WalletAccount } from '../main/types'
+import type { BootstrapData, CallRecord, Conversation, Friend, FriendRequest, GroupActionResult, GroupChat, GroupMember, Message, MessagePage, MessagePageCursor, OpenConversationResult, PendingAttachment, ProfilePatch, User, WalletAccount } from '../main/types'
 
 declare global {
   interface Window {
@@ -8,7 +8,7 @@ declare global {
       logout(): Promise<boolean>
       bootstrap(): Promise<BootstrapData>
       loadLocalChatState(): Promise<{ conversations: Conversation[], messages: Record<string, Message[]> }>
-      loadConversationMessages(chatKey: string): Promise<Message[]>
+      loadConversationMessages(chatKey: string, cursor?: MessagePageCursor | null, pageSize?: number): Promise<MessagePage>
       setSessionPinned(chatKey: string, pinned: boolean): Promise<Conversation[]>
       markSessionRead(chatKey: string): Promise<void>
       setActiveSession(chatKey: string | null): Promise<void>
@@ -29,9 +29,8 @@ declare global {
       retryMessage(clientMessageId: string): Promise<Message>
       updateProfile(patch: ProfilePatch): Promise<User>
       updateAvatar(): Promise<User | null>
-      resetTransferPassword(oldPassword: string, newPassword: string): Promise<WalletAccount>
+      resetPayPassword(oldPassword: string, newPassword: string): Promise<WalletAccount>
       getWallet(): Promise<WalletAccount>
-      transfer(recipientUserId: string, amount: string, payPassword: string): Promise<TransferResult>
       sendRedPacket(conversationId: string, input: { chatType: number, targetId: string, packetType: number, totalAmount: string, totalCount: number, message: string, payPassword: string }): Promise<Message>
       claimRedPacket(packetId: string): Promise<{ amount: string, alreadyReceived: boolean, expired: boolean }>
       translateText(value: string, targetLanguage?: string): Promise<string>
@@ -39,6 +38,7 @@ declare global {
       transcribeVoice(resourceId: string): Promise<string>
       createCall(calleeId: string, callType: number): Promise<CallRecord>
       updateCall(callId: string, action: 'accept' | 'complete' | 'reject' | 'missed' | 'cancel'): Promise<CallRecord>
+      getCall(callId: string): Promise<CallRecord>
       getIceServers(): Promise<{ iceServers: RTCIceServer[] }>
       sendCallSignal(callId: string, targetUserId: string, signalType: 'offer' | 'answer' | 'ice' | 'hangup', payload: unknown): Promise<void>
       acceptFriendRequest(id: string, type: 'friend' | 'group'): Promise<FriendRequest>
@@ -47,6 +47,7 @@ declare global {
       searchFriendByUsername(username: string): Promise<Friend>
       applyAddFriend(username: string, reason: string): Promise<FriendRequest>
       listFriends(): Promise<Friend[]>
+      listContactRequests(): Promise<FriendRequest[]>
       deleteFriend(id: string): Promise<void>
       searchGroupByNumber(groupNumber: string): Promise<GroupChat>
       applyJoinGroup(groupNumber: string, reason: string): Promise<FriendRequest>
@@ -60,8 +61,10 @@ declare global {
       leaveGroup(groupId: string): Promise<void>
       dissolveGroup(groupId: string): Promise<void>
       createGroup(name: string): Promise<GroupActionResult>
-      refreshContacts(): Promise<{ friends: Friend[], friendRequests: FriendRequest[], groups: GroupChat[] }>
+      refreshContacts(): Promise<{ friends: Friend[], friendRequests: FriendRequest[], groups: GroupChat[], conversations: Conversation[] }>
       markNotificationRead(id: string): Promise<unknown>
+      listNotifications(): Promise<import('../main/types').AppNotification[]>
+      copyText(value: string): Promise<boolean>
       setWindowMode(mode: 'login' | 'register' | 'main'): void
       minimizeWindow(): Promise<boolean>
       toggleMaximize(): Promise<boolean>

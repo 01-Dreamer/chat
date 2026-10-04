@@ -25,6 +25,7 @@ import java.util.UUID;
 
 @Service
 public class CallManagementService {
+    private static final long RING_TIMEOUT_SECONDS = 60;
     private final CallRecordMapper callMapper;
     private final FriendMapper friendMapper;
     private final RealtimeEventPublisher publisher;
@@ -143,6 +144,21 @@ public class CallManagementService {
         if (!turnUrls.isBlank()) servers.add(Map.of(
                 "urls", turnUrls, "username", turnUsername, "credential", turnCredential));
         return Map.of("iceServers", servers);
+    }
+
+    public CallRecordResponse pendingIncoming(long calleeId) {
+        CallRecord call = callMapper.selectPendingIncoming(
+                calleeId, LocalDateTime.now().minusSeconds(RING_TIMEOUT_SECONDS));
+        return call == null ? null : CallRecordResponse.from(call);
+    }
+
+    public CallRecordResponse get(long userId, long callId) {
+        CallRecord call = callMapper.selectById(callId);
+        if (call == null) throw new BusinessException("CALL_NOT_FOUND", "通话记录不存在", HttpStatus.NOT_FOUND);
+        if (!isParticipant(call, userId)) {
+            throw new BusinessException("CALL_ACCESS_DENIED", "无权查看该通话", HttpStatus.FORBIDDEN);
+        }
+        return CallRecordResponse.from(call);
     }
 
     private CallRecord requireParticipantForUpdate(long userId, long callId) {

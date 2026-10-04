@@ -4,8 +4,6 @@ import { databaseManager } from '../database/databaseManager'
 import { authService } from './authService'
 import { realtimeService } from './realtimeService'
 import { apiClient } from './apiClient'
-import { fileService } from './fileService'
-import { walletService } from './walletService'
 
 interface SendTextInput {
   conversationId: string
@@ -84,17 +82,10 @@ class MessageService {
   async openConversation(type: 'direct' | 'group', targetId: string): Promise<OpenConversationResult> {
     const conversation = databaseManager.openConversation(type, targetId)
     if (!conversation) throw new Error('无法创建本地会话')
-    try {
-      const history = await apiClient.get<ServerMessage[]>(`/messages?chatKey=${encodeURIComponent(conversation.id)}&limit=50`)
-      for (const message of history) await this.prepareReference(message)
-      databaseManager.applyHistory(history)
-    } catch {
-      // Existing SQLite history remains available offline or after membership loss.
-    }
     databaseManager.markSessionRead(conversation.id)
     return {
       conversation: databaseManager.getConversation(conversation.id) ?? conversation,
-      messages: databaseManager.loadConversationMessages(conversation.id),
+      ...databaseManager.loadConversationMessages(conversation.id),
     }
   }
 
@@ -113,15 +104,6 @@ class MessageService {
       retry.message.sendStatus = 'failed'
     }
     return retry.message
-  }
-
-  private async prepareReference(message: ServerMessage) {
-    if (!message.referenceId) return
-    if (message.messageType === 1 && !databaseManager.getFileResource(message.referenceId)) {
-      try { await fileService.get(message.referenceId) } catch { /* Message history is still usable. */ }
-    } else if (message.messageType === 2 && !databaseManager.getRedPacket(message.referenceId)) {
-      try { databaseManager.upsertRedPacket(await walletService.getRedPacket(message.referenceId)) } catch { /* Keep message. */ }
-    }
   }
 
   private parseChatKey(chatKey: string, currentUserId: string) {

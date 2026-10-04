@@ -1,6 +1,6 @@
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
-PRAGMA user_version = 4;
+PRAGMA user_version = 7;
 
 
 -- =========================================================
@@ -73,6 +73,10 @@ CREATE TABLE IF NOT EXISTS `group` (
     avatar_url TEXT DEFAULT NULL,                      -- 群头像URL
     avatar_local_path TEXT DEFAULT NULL,               -- 群头像本地缓存路径
     owner_id TEXT NOT NULL,                            -- 群主用户ID
+    owner_name TEXT NOT NULL DEFAULT '群主',           -- 群主昵称快照
+    member_count INTEGER NOT NULL DEFAULT 0,            -- 服务端成员数量快照
+    current_user_role INTEGER NOT NULL DEFAULT 0,       -- 当前用户角色
+    current_user_nickname TEXT DEFAULT NULL,            -- 当前用户群昵称
     status INTEGER NOT NULL DEFAULT 1,                 -- 群状态：0-已解散，1-正常
     created_time INTEGER NOT NULL,                     -- 创建时间
     updated_time INTEGER NOT NULL,                     -- 更新时间
@@ -198,9 +202,10 @@ CREATE TABLE IF NOT EXISTS `message` (
 
     status INTEGER NOT NULL DEFAULT 0,                 -- 消息状态：0-正常，1-已撤回
     recall_operator_id TEXT DEFAULT NULL,              -- 撤回操作者用户ID
+    recall_operator_name TEXT DEFAULT NULL,            -- 撤回操作者昵称快照
     recalled_time INTEGER DEFAULT NULL,                -- 撤回时间
 
-    send_status INTEGER NOT NULL DEFAULT 0,            -- 发送状态：0-发送中，1-发送成功，2-发送失败
+    send_status INTEGER NOT NULL DEFAULT 0,            -- 发送状态：0-发送中，1-已持久化，2-发送失败，3-已进入可靠队列
 
     created_time INTEGER NOT NULL,                     -- 创建时间
     updated_time INTEGER NOT NULL,                     -- 更新时间
@@ -353,6 +358,14 @@ CREATE TABLE IF NOT EXISTS inbox_sync_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),             -- 固定为1，只保存一条记录
     last_sequence INTEGER NOT NULL DEFAULT 0,          -- 已同步到的用户信箱序列号
     updated_time INTEGER NOT NULL                      -- 更新时间
+);
+
+-- 通讯录/群资料版本快照。UI 始终读取业务表，本表只保存服务端同步版本。
+CREATE TABLE IF NOT EXISTS directory_sync_state (
+    sync_key TEXT NOT NULL,
+    version TEXT NOT NULL,
+    updated_time INTEGER NOT NULL,
+    PRIMARY KEY (sync_key)
 );
 
 INSERT OR IGNORE INTO inbox_sync_state (

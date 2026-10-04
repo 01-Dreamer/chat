@@ -9,12 +9,17 @@ import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 import top.zxylearn.chatserver.dto.message.SendMessageCommand;
 import top.zxylearn.chatserver.mq.MessageCommandPublisher;
+import top.zxylearn.chatserver.mq.RealtimeEvent;
+import top.zxylearn.chatserver.mq.RealtimeEventPublisher;
 import top.zxylearn.chatserver.service.CallManagementService;
+import top.zxylearn.chatserver.service.MessagePersistenceService;
+import top.zxylearn.chatserver.vo.CallRecordResponse;
 import top.zxylearn.chatserver.service.ActionRateLimiter;
 import top.zxylearn.chatserver.exception.BusinessException;
 import org.springframework.beans.factory.annotation.Value;
 
 import java.util.Map;
+import java.util.LinkedHashMap;
 
 @Component
 public class ChatWebSocketHandler extends TextWebSocketHandler {
@@ -22,6 +27,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final ObjectMapper objectMapper;
     private final LocalWebSocketRegistry registry;
     private final MessageCommandPublisher messagePublisher;
+    private final RealtimeEventPublisher realtimePublisher;
+    private final MessagePersistenceService messagePersistenceService;
     private final CallManagementService callService;
     private final ActionRateLimiter rateLimiter;
     private final int messageRateLimit;
@@ -31,6 +38,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             ObjectMapper objectMapper,
             LocalWebSocketRegistry registry,
             MessageCommandPublisher messagePublisher,
+            RealtimeEventPublisher realtimePublisher,
+            MessagePersistenceService messagePersistenceService,
             CallManagementService callService,
             ActionRateLimiter rateLimiter,
             @Value("${chat.rate-limit.message.max-requests}") int messageRateLimit,
@@ -38,6 +47,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         this.objectMapper = objectMapper;
         this.registry = registry;
         this.messagePublisher = messagePublisher;
+        this.realtimePublisher = realtimePublisher;
+        this.messagePersistenceService = messagePersistenceService;
         this.callService = callService;
         this.rateLimiter = rateLimiter;
         this.messageRateLimit = messageRateLimit;
@@ -48,6 +59,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     public void afterConnectionEstablished(WebSocketSession session) {
         registry.add(userId(session), deviceId(session), session);
         registry.send(userId(session), Map.of("type", "CONNECTED"));
+        sendPendingCall(session);
     }
 
     @Override
@@ -64,6 +76,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             synchronized (session) {
                 session.sendMessage(new TextMessage("{\"type\":\"PONG\"}"));
             }
+            sendPendingCall(session);
             return;
         }
         if ("SIGNAL".equals(incoming.type()) && incoming.data() != null) {
@@ -100,7 +113,18 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     input.content(),
                     input.referenceId(),
                     input.replyMessageId());
-            messagePublisher.publish(command);
+            MessagePersistenceService.PreviewDelivery delivery = messagePersistenceService.prepareFastDelivery(command);
+            sendQueued(session, command.clientMessageId());
+            sendLocalPreview(delivery, session);
+            messagePublisher.publish(delivery.command()).whenComplete((ignored, error) -> {
+                if (error != null) {
+                    sendError(session, command.clientMessageId(),
+                            "MESSAGE_QUEUE_UNAVAILABLE", "消息暂时无法发送，请稍后重试");
+                    rejectFastPreview(delivery, session);
+                    return;
+                }
+                publishRemotePreview(delivery, session);
+            });
         } catch (BusinessException exception) {
             sendError(session, inputClientMessageId(incoming.data()), exception.getCode(), exception.getMessage());
         } catch (Exception exception) {
@@ -125,6 +149,63 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
     private void sendError(WebSocketSession session, String clientMessageId, String code, String message) {
         registry.send(userId(session), new OutgoingError("SEND_FAILED", code, message, clientMessageId));
+    }
+
+    private void sendQueued(WebSocketSession session, String clientMessageId) {
+        registry.send(userId(session), Map.of(
+                "type", "MESSAGE_QUEUED",
+                "clientMessageId", clientMessageId));
+    }
+
+    private void sendLocalPreview(
+            MessagePersistenceService.PreviewDelivery delivery,
+            WebSocketSession senderSession) {
+        long senderId = userId(senderSession);
+        for (Long recipientId : delivery.recipientIds()) {
+            if (recipientId == senderId) continue;
+            registry.send(recipientId, Map.of("type", "MESSAGE_PREVIEW", "data", delivery.message()));
+        }
+    }
+
+    private void publishRemotePreview(
+            MessagePersistenceService.PreviewDelivery delivery,
+            WebSocketSession senderSession) {
+        long senderId = userId(senderSession);
+        Map<Long, Long> targets = new LinkedHashMap<>();
+        for (Long recipientId : delivery.recipientIds()) {
+            if (recipientId != senderId) targets.put(recipientId, 0L);
+        }
+        if (!targets.isEmpty()) {
+            realtimePublisher.publish(RealtimeEvent.businessEvent("MESSAGE_PREVIEW", targets, delivery.message()));
+        }
+    }
+
+    private void rejectFastPreview(
+            MessagePersistenceService.PreviewDelivery delivery,
+            WebSocketSession senderSession) {
+        long senderId = userId(senderSession);
+        Map<Long, Long> targets = new LinkedHashMap<>();
+        Map<String, String> data = Map.of(
+                "senderId", Long.toString(senderId),
+                "clientMessageId", delivery.message().clientMessageId(),
+                "chatKey", delivery.message().chatKey());
+        for (Long recipientId : delivery.recipientIds()) {
+            if (recipientId == senderId) continue;
+            targets.put(recipientId, 0L);
+            registry.send(recipientId, Map.of("type", "MESSAGE_REJECTED", "data", data));
+        }
+        if (!targets.isEmpty()) {
+            realtimePublisher.publish(RealtimeEvent.businessEvent("MESSAGE_REJECTED", targets, data));
+        }
+    }
+
+    private void sendPendingCall(WebSocketSession session) {
+        try {
+            CallRecordResponse pending = callService.pendingIncoming(userId(session));
+            if (pending != null) registry.send(userId(session), Map.of("type", "CALL_INVITE", "data", pending));
+        } catch (Exception ignored) {
+            // A temporary database failure must not break messaging heartbeats.
+        }
     }
 
     private long userId(WebSocketSession session) {

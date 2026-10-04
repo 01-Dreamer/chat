@@ -264,7 +264,7 @@ CREATE TABLE account_transaction (
     client_transaction_id VARCHAR(64) DEFAULT NULL COMMENT '客户端幂等ID',
     from_user_id BIGINT DEFAULT NULL COMMENT '出账用户ID',
     to_user_id BIGINT DEFAULT NULL COMMENT '入账用户ID',
-    transaction_type TINYINT NOT NULL COMMENT '类型：0-转账，1-发红包，2-领红包，3-红包退款',
+    transaction_type TINYINT NOT NULL COMMENT '类型：1-发红包，2-领红包，3-红包退款',
     amount DECIMAL(12,2) NOT NULL COMMENT '金额',
     reference_id BIGINT DEFAULT NULL COMMENT '关联业务ID',
     status TINYINT NOT NULL DEFAULT 1 COMMENT '状态：0-处理中，1-成功，2-失败',

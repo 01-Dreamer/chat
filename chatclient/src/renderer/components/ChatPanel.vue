@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { ChatDotSquare, ChatLineSquare, Clock, Close, FolderOpened, MagicStick, Microphone, Money, Phone, Scissor, Search, VideoCamera } from '@element-plus/icons-vue'
+import { ChatDotSquare, ChatLineSquare, Clock, Close, FolderOpened, MagicStick, Microphone, Money, MoreFilled, Phone, Scissor, Search, VideoCamera } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useAppStore } from '../stores/app'
 import { useChatStore } from '../stores/chat'
 import { useCallStore } from '../stores/call'
 import { useContactsStore } from '../stores/contacts'
-import type { Message, PendingAttachment } from '../types'
+import type { GroupMember, Message, PendingAttachment } from '../types'
 import { formatMessageTime, shouldShowMessageTime } from '../utils/messageTime'
+import AvatarDisplay from './AvatarDisplay.vue'
 import MessageBubble from './MessageBubble.vue'
 
 const appStore = useAppStore()
@@ -27,13 +28,16 @@ const recordingSeconds = ref(0)
 const recordingBusy = ref(false)
 const walletVisible = ref(false)
 const walletBusy = ref(false)
-const walletMode = ref<'red_packet' | 'transfer'>('red_packet')
 const walletForm = reactive({ amount: '', count: 1, greeting: '恭喜发财，大吉大利', payPassword: '', packetType: 1 })
 const smartReplyBusy = ref(false)
 const smartReplies = ref<string[]>([])
 const quoteTarget = ref<Message | null>(null)
 const historyVisible = ref(false)
 const historyKeyword = ref('')
+const groupMembersVisible = ref(false)
+const groupMembersBusy = ref(false)
+const groupMembers = ref<GroupMember[]>([])
+const loadingOlderMessages = ref(false)
 const scrollThumbHeight = ref(0)
 const scrollThumbTop = ref(0)
 let resizeObserver: ResizeObserver | undefined
@@ -47,6 +51,9 @@ let recordingChunks: Blob[] = []
 let discardRecording = false
 let recordingConversationId = ''
 let jumpHighlightTimer: number | undefined
+let recallClockTimer: number | undefined
+const recallClock = ref(Date.now())
+const SELF_RECALL_WINDOW_MS = 5 * 60 * 1000
 
 const currentGroupRole = computed(() => {
   const conversation = chatStore.currentConversation
@@ -66,7 +73,7 @@ function isOwnMessage(message: Message) {
 
 function canRecallMessage(message: Message) {
   if (message.type === 'red_packet' || message.status === 1 || message.id.startsWith('local:')) return false
-  if (isOwnMessage(message)) return true
+  if (isOwnMessage(message)) return recallClock.value - message.createdAt <= SELF_RECALL_WINDOW_MS
   return chatStore.currentConversation?.type === 'group' && currentGroupRole.value >= 1
 }
 
@@ -105,9 +112,14 @@ function historyPreview(message: Message) {
 
 function recallNotice(message: Message) {
   const operatorId = message.recallOperatorId ?? message.senderId
+  if (chatStore.currentConversation?.type === 'group') {
+    if (operatorId === message.senderId) return `${messageSenderDisplayName(message)}撤回了一条消息`
+    const operatorName = message.recallOperatorName
+      || (operatorId === appStore.currentUser?.id || operatorId === 'me' ? appStore.currentUser?.nickname : '')
+    return `管理员${operatorName || ''}撤回了一条消息`
+  }
   if (operatorId === appStore.currentUser?.id || operatorId === 'me') return '你撤回了一条消息'
-  const operatorName = message.recallOperatorName || (operatorId === message.senderId ? message.senderName : '管理员')
-  return `${operatorName}撤回了一条消息`
+  return `${message.recallOperatorName || message.senderName}撤回了一条消息`
 }
 
 function updateScrollThumb() {
@@ -154,10 +166,53 @@ function handleMessageContentResized() {
   })
 }
 
+async function loadOlderMessages() {
+  const conversationId = chatStore.currentConversationId
+  const element = chatWindowRef.value
+  if (!conversationId || !element || loadingOlderMessages.value) return
+  const pageState = chatStore.getMessagePageState(conversationId)
+  if (!pageState.hasMore || !pageState.nextCursor) return
+  loadingOlderMessages.value = true
+  shouldStickToBottom = false
+  const previousHeight = element.scrollHeight
+  const previousTop = element.scrollTop
+  try {
+    const page = await window.chatApi.loadConversationMessages(conversationId, pageState.nextCursor)
+    if (conversationId !== chatStore.currentConversationId) return
+    chatStore.prependConversationMessagePage(conversationId, page)
+    await nextTick()
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    element.scrollTop = previousTop + element.scrollHeight - previousHeight
+    updateScrollThumb()
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '聊天记录加载失败')
+  } finally {
+    loadingOlderMessages.value = false
+  }
+}
+
 function handleChatScroll() {
   const element = chatWindowRef.value
-  if (element) shouldStickToBottom = isAtBottom(element)
+  if (element) {
+    shouldStickToBottom = isAtBottom(element)
+    if (element.scrollTop <= 48) void loadOlderMessages()
+  }
   updateScrollThumb()
+}
+
+async function openGroupMembers() {
+  const conversation = chatStore.currentConversation
+  if (!conversation || conversation.type !== 'group') return
+  groupMembersVisible.value = true
+  groupMembersBusy.value = true
+  try {
+    groupMembers.value = await window.chatApi.listGroupMembers(conversation.targetId)
+    chatStore.applyGroupMemberProfiles(conversation.targetId, groupMembers.value)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '群成员加载失败')
+  } finally {
+    groupMembersBusy.value = false
+  }
 }
 
 function stopScrollThumbDrag() {
@@ -337,7 +392,6 @@ async function startVoiceRecording() {
 }
 
 function openWallet() {
-  walletMode.value = 'red_packet'
   walletForm.amount = ''
   walletForm.count = chatStore.currentConversation?.type === 'group' ? 2 : 1
   walletForm.greeting = '恭喜发财，大吉大利'
@@ -354,23 +408,17 @@ async function submitWalletAction() {
   const amount = rawAmount.includes('.') ? rawAmount.padEnd(rawAmount.indexOf('.') + 3, '0') : `${rawAmount}.00`
   walletBusy.value = true
   try {
-    if (walletMode.value === 'transfer') {
-      if (conversation.type !== 'direct') throw new Error('只能向好友转账')
-      await window.chatApi.transfer(conversation.targetId, amount, walletForm.payPassword)
-      ElMessage.success('转账成功')
-    } else {
-      const message = await window.chatApi.sendRedPacket(conversation.id, {
-        chatType: conversation.type === 'group' ? 1 : 0,
-        targetId: conversation.targetId,
-        packetType: conversation.type === 'group' ? walletForm.packetType : 0,
-        totalAmount: amount,
-        totalCount: conversation.type === 'group' ? Math.max(1, Math.trunc(walletForm.count)) : 1,
-        message: walletForm.greeting.trim(),
-        payPassword: walletForm.payPassword,
-      })
-      chatStore.appendMessage(message)
-      ElMessage.success('红包已发送')
-    }
+    const message = await window.chatApi.sendRedPacket(conversation.id, {
+      chatType: conversation.type === 'group' ? 1 : 0,
+      targetId: conversation.targetId,
+      packetType: conversation.type === 'group' ? walletForm.packetType : 0,
+      totalAmount: amount,
+      totalCount: conversation.type === 'group' ? Math.max(1, Math.trunc(walletForm.count)) : 1,
+      message: walletForm.greeting.trim(),
+      payPassword: walletForm.payPassword,
+    })
+    chatStore.appendMessage(message)
+    ElMessage.success('红包已发送')
     const wallet = await window.chatApi.getWallet()
     if (appStore.currentUser) appStore.currentUser.balance = wallet.balance
     walletVisible.value = false
@@ -452,6 +500,7 @@ watch(() => chatStore.currentMessages.length, async (length, previousLength) => 
   else updateScrollThumb()
 })
 onMounted(async () => {
+  recallClockTimer = window.setInterval(() => { recallClock.value = Date.now() }, 15_000)
   await nextTick()
   resizeObserver = new ResizeObserver(() => {
     if (shouldStickToBottom) scrollToBottom()
@@ -462,6 +511,7 @@ onMounted(async () => {
   void settleScrollToBottom(chatStore.currentConversationId)
 })
 onBeforeUnmount(() => {
+  window.clearInterval(recallClockTimer)
   resizeObserver?.disconnect()
   stopScrollThumbDrag()
   window.clearTimeout(jumpHighlightTimer)
@@ -477,10 +527,12 @@ onBeforeUnmount(() => {
       <header class="session-info no-drag">
         <div class="session-drag-strip" aria-hidden="true" />
         <div class="current-session-name no-drag">{{ chatStore.currentConversation.name }} <el-icon v-if="chatStore.currentConversation.type === 'group'" class="group-mark"><ChatDotSquare /></el-icon></div>
+        <button v-if="chatStore.currentConversation.type === 'group'" class="more-button group-members-button" title="查看群成员" @click="openGroupMembers"><el-icon><MoreFilled /></el-icon></button>
       </header>
       <div class="chat-scroll-area no-drag">
         <div ref="chatWindowRef" class="chat-window no-drag" @scroll="handleChatScroll">
           <div ref="messageListRef" class="message-list">
+            <div v-if="loadingOlderMessages" class="older-messages-loading">正在加载更早的消息...</div>
             <template v-for="(message, index) in chatStore.currentMessages" :key="message.id">
               <div v-if="shouldShowMessageTime(chatStore.currentMessages, index)" class="message-time">{{ formatMessageTime(message.createdAt) }}</div>
               <div v-if="message.status === 1" class="message-recall-notice" :data-message-id="message.id">{{ recallNotice(message) }}</div>
@@ -520,16 +572,12 @@ onBeforeUnmount(() => {
       </footer>
     </template>
     <div v-else class="blank-chat"><el-icon><ChatDotSquare /></el-icon></div>
-    <el-dialog v-model="walletVisible" title="红包与转账" width="380px" append-to-body>
-      <el-radio-group v-if="chatStore.currentConversation?.type === 'direct'" v-model="walletMode">
-        <el-radio-button value="red_packet">发红包</el-radio-button>
-        <el-radio-button value="transfer">转账</el-radio-button>
-      </el-radio-group>
+    <el-dialog v-model="walletVisible" title="发红包" width="380px" append-to-body>
       <el-form label-position="top" class="wallet-form">
         <el-form-item label="金额"><el-input v-model="walletForm.amount" inputmode="decimal" placeholder="0.00"><template #prepend>¥</template></el-input></el-form-item>
-        <el-form-item v-if="walletMode === 'red_packet' && chatStore.currentConversation?.type === 'group'" label="红包个数"><el-input-number v-model="walletForm.count" :min="1" :max="500" /></el-form-item>
-        <el-form-item v-if="walletMode === 'red_packet' && chatStore.currentConversation?.type === 'group'" label="红包类型"><el-radio-group v-model="walletForm.packetType"><el-radio :value="1">拼手气</el-radio><el-radio :value="0">普通</el-radio></el-radio-group></el-form-item>
-        <el-form-item v-if="walletMode === 'red_packet'" label="祝福语"><el-input v-model="walletForm.greeting" maxlength="128" /></el-form-item>
+        <el-form-item v-if="chatStore.currentConversation?.type === 'group'" label="红包个数"><el-input-number v-model="walletForm.count" :min="1" :max="500" /></el-form-item>
+        <el-form-item v-if="chatStore.currentConversation?.type === 'group'" label="红包类型"><el-radio-group v-model="walletForm.packetType"><el-radio :value="1">拼手气</el-radio><el-radio :value="0">普通</el-radio></el-radio-group></el-form-item>
+        <el-form-item label="祝福语"><el-input v-model="walletForm.greeting" maxlength="128" /></el-form-item>
         <el-form-item label="支付密码"><el-input v-model="walletForm.payPassword" type="password" maxlength="6" inputmode="numeric" show-password /></el-form-item>
       </el-form>
       <template #footer><el-button @click="walletVisible = false">取消</el-button><el-button type="success" :loading="walletBusy" @click="submitWalletAction">确认</el-button></template>
@@ -543,6 +591,17 @@ onBeforeUnmount(() => {
         </div>
         <div v-if="!historyMessages.length" class="history-empty">没有找到聊天记录</div>
       </div>
+    </el-drawer>
+    <el-drawer v-model="groupMembersVisible" direction="rtl" size="360px" title="群成员" append-to-body class="side-drawer group-members-drawer no-drag">
+      <div class="readonly-group-summary">{{ chatStore.currentConversation?.name }} · {{ groupMembers.length }} 位成员</div>
+      <div class="readonly-group-members" v-loading="groupMembersBusy">
+        <div v-for="member in groupMembers" :key="member.id" class="group-member-row">
+          <AvatarDisplay :src="member.avatar" :name="member.groupNickname || member.nickname" :size="36" />
+          <span class="group-member-copy"><strong>{{ member.groupNickname || member.nickname }}</strong><small>{{ member.role === 2 ? '群主' : member.role === 1 ? '管理员' : '成员' }}</small></span>
+        </div>
+        <div v-if="!groupMembersBusy && !groupMembers.length" class="history-empty">暂无可显示的群成员</div>
+      </div>
+      <p class="readonly-group-tip">此处仅供查看；群主和管理员请前往通讯录进行群管理。</p>
     </el-drawer>
   </section>
 </template>

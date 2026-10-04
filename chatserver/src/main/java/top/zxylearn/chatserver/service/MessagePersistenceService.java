@@ -1,6 +1,7 @@
 package top.zxylearn.chatserver.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.incrementer.IdentifierGenerator;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -13,6 +14,7 @@ import top.zxylearn.chatserver.entity.Message;
 import top.zxylearn.chatserver.entity.RedPacket;
 import top.zxylearn.chatserver.entity.CallRecord;
 import top.zxylearn.chatserver.entity.FileResourceAccess;
+import top.zxylearn.chatserver.entity.User;
 import top.zxylearn.chatserver.exception.BusinessException;
 import top.zxylearn.chatserver.mapper.FileResourceMapper;
 import top.zxylearn.chatserver.mapper.FriendMapper;
@@ -22,6 +24,7 @@ import top.zxylearn.chatserver.mapper.MessageMapper;
 import top.zxylearn.chatserver.mapper.RedPacketMapper;
 import top.zxylearn.chatserver.mapper.CallRecordMapper;
 import top.zxylearn.chatserver.mapper.FileResourceAccessMapper;
+import top.zxylearn.chatserver.mapper.UserMapper;
 import top.zxylearn.chatserver.vo.MessageResponse;
 
 import java.time.LocalDateTime;
@@ -31,6 +34,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+
+import static top.zxylearn.chatserver.util.TimeUtils.fromEpochMilli;
+import static top.zxylearn.chatserver.util.TimeUtils.toEpochMilli;
 
 @Service
 public class MessagePersistenceService {
@@ -43,6 +49,7 @@ public class MessagePersistenceService {
     private static final int MESSAGE_RECALLED = 1;
     private static final int ROLE_ADMIN = 1;
     private static final int ROLE_OWNER = 2;
+    private static final long SELF_RECALL_WINDOW_MINUTES = 5;
     private static final int EVENT_MESSAGE = 0;
     private static final int EVENT_RECALL = 1;
 
@@ -55,7 +62,9 @@ public class MessagePersistenceService {
     private final RedPacketMapper redPacketMapper;
     private final CallRecordMapper callRecordMapper;
     private final FileResourceAccessMapper fileResourceAccessMapper;
+    private final UserMapper userMapper;
     private final ChatAccessCache chatAccessCache;
+    private final IdentifierGenerator identifierGenerator;
 
     public MessagePersistenceService(
             MessageMapper messageMapper,
@@ -66,8 +75,10 @@ public class MessagePersistenceService {
             RedPacketMapper redPacketMapper,
             CallRecordMapper callRecordMapper,
             FileResourceAccessMapper fileResourceAccessMapper,
+            UserMapper userMapper,
             ReliableEventService reliableEventService,
-            ChatAccessCache chatAccessCache) {
+            ChatAccessCache chatAccessCache,
+            IdentifierGenerator identifierGenerator) {
         this.messageMapper = messageMapper;
         this.friendMapper = friendMapper;
         this.groupMapper = groupMapper;
@@ -76,8 +87,54 @@ public class MessagePersistenceService {
         this.redPacketMapper = redPacketMapper;
         this.callRecordMapper = callRecordMapper;
         this.fileResourceAccessMapper = fileResourceAccessMapper;
+        this.userMapper = userMapper;
         this.reliableEventService = reliableEventService;
         this.chatAccessCache = chatAccessCache;
+        this.identifierGenerator = identifierGenerator;
+    }
+
+    public PreviewDelivery prepareFastDelivery(SendMessageCommand original) {
+        validateCommand(original);
+        long targetId = parseId(original.targetId(), "INVALID_TARGET_ID", "消息目标ID格式不正确");
+        List<Long> recipients = resolveRecipients(original.senderId(), original.chatType(), targetId);
+        Long referenceId = nullableId(original.referenceId(), "INVALID_REFERENCE_ID", "关联业务ID格式不正确");
+        Long replyMessageId = nullableId(original.replyMessageId(), "INVALID_REPLY_MESSAGE_ID", "引用消息ID格式不正确");
+        validateReferences(original.messageType(), referenceId, replyMessageId,
+                original.chatType(), targetId, original.senderId());
+
+        long acceptedTime = System.currentTimeMillis();
+        long messageId = identifierGenerator.nextId(new Message()).longValue();
+        String resolvedChatKey = chatKey(original.chatType(), original.senderId(), targetId);
+        User sender = userMapper.selectById(original.senderId());
+        GroupMember senderMember = original.chatType() == CHAT_GROUP
+                ? findMember(targetId, original.senderId()) : null;
+        SendMessageCommand command = original.withFastDelivery(
+                messageId, acceptedTime, recipients, resolvedChatKey);
+        MessageResponse preview = new MessageResponse(
+                Long.toString(messageId),
+                original.clientMessageId(),
+                resolvedChatKey,
+                Long.toString(original.senderId()),
+                original.chatType(),
+                Long.toString(targetId),
+                original.messageType(),
+                normalizeContent(original.content()),
+                stringId(referenceId),
+                stringId(replyMessageId),
+                0,
+                null,
+                null,
+                null,
+                acceptedTime,
+                acceptedTime,
+                sender == null ? null : sender.getUsername(),
+                sender == null ? null : sender.getNickname(),
+                sender == null ? null : sender.getAvatarUrl(),
+                sender == null ? 0 : toEpochMilli(sender.getUpdatedTime()),
+                senderMember == null ? null : stringId(senderMember.getId()),
+                senderMember == null ? null : senderMember.getNickname(),
+                senderMember == null ? 0 : toEpochMilli(senderMember.getUpdatedTime()));
+        return new PreviewDelivery(command, preview, recipients);
     }
 
     @Transactional
@@ -89,7 +146,7 @@ public class MessagePersistenceService {
 
         Message existing = messageMapper.selectByClientMessageId(command.senderId(), command.clientMessageId());
         if (existing != null) {
-            return new PersistedMessage(MessageResponse.from(existing), Map.of(command.senderId(), 0L), true);
+            return new PersistedMessage(messageResponse(existing), Map.of(command.senderId(), 0L), true);
         }
 
         Long referenceId = nullableId(command.referenceId(), "INVALID_REFERENCE_ID", "关联业务ID格式不正确");
@@ -97,7 +154,11 @@ public class MessagePersistenceService {
         validateReferences(command.messageType(), referenceId, replyMessageId, command.chatType(), targetId, command.senderId());
 
         LocalDateTime now = LocalDateTime.now();
+        LocalDateTime createdTime = command.acceptedTime() == null
+                ? now
+                : fromEpochMilli(command.acceptedTime());
         Message message = new Message();
+        if (command.messageId() != null) message.setId(command.messageId());
         message.setClientMessageId(command.clientMessageId());
         message.setChatType(command.chatType());
         message.setTargetId(targetId);
@@ -108,12 +169,12 @@ public class MessagePersistenceService {
         message.setReferenceId(referenceId);
         message.setReplyMessageId(replyMessageId);
         message.setStatus(0);
-        message.setCreatedTime(now);
+        message.setCreatedTime(createdTime);
         message.setUpdatedTime(now);
         messageMapper.insert(message);
         ReliableEventService.EventDelivery delivery = reliableEventService.appendForLockedUsers(
                 EVENT_MESSAGE, message.getId(), recipients, now);
-        return new PersistedMessage(MessageResponse.from(message), delivery.sequences(), false);
+        return new PersistedMessage(messageResponse(message), delivery.sequences(), false);
     }
 
     @Transactional
@@ -123,11 +184,11 @@ public class MessagePersistenceService {
             throw new BusinessException("MESSAGE_NOT_FOUND", "消息不存在", HttpStatus.NOT_FOUND);
         }
         if (message.getStatus() == MESSAGE_RECALLED) {
-            return new PersistedMessage(MessageResponse.from(message), Map.of(currentUserId, 0L), true);
+            return new PersistedMessage(messageResponse(message), Map.of(currentUserId, 0L), true);
         }
-        List<Long> recipients = resolveRecipients(message.getSenderId(), message.getChatType(), message.getTargetId());
-        checkRecallPermission(currentUserId, message);
         LocalDateTime now = LocalDateTime.now();
+        List<Long> recipients = resolveRecipients(message.getSenderId(), message.getChatType(), message.getTargetId());
+        checkRecallPermission(currentUserId, message, now);
         message.setStatus(MESSAGE_RECALLED);
         message.setRecallOperatorId(currentUserId);
         message.setRecalledTime(now);
@@ -135,7 +196,7 @@ public class MessagePersistenceService {
         messageMapper.updateById(message);
         ReliableEventService.EventDelivery delivery = reliableEventService.append(
                 EVENT_RECALL, message.getId(), recipients, now);
-        return new PersistedMessage(MessageResponse.from(message), delivery.sequences(), false);
+        return new PersistedMessage(messageResponse(message), delivery.sequences(), false);
     }
 
     public List<MessageResponse> history(long currentUserId, String chatKey, Long beforeId, int limit) {
@@ -146,7 +207,31 @@ public class MessagePersistenceService {
                 .orderByDesc(Message::getId)
                 .last("LIMIT " + safeLimit);
         if (beforeId != null) query.lt(Message::getId, beforeId);
-        return messageMapper.selectList(query).stream().map(MessageResponse::from).toList();
+        List<Message> messages = messageMapper.selectList(query);
+        Set<Long> operatorIds = messages.stream()
+                .map(Message::getRecallOperatorId)
+                .filter(java.util.Objects::nonNull)
+                .collect(java.util.stream.Collectors.toSet());
+        Map<Long, String> operatorNames = operatorIds.isEmpty()
+                ? Map.of()
+                : userMapper.selectByIds(operatorIds).stream()
+                        .collect(java.util.stream.Collectors.toMap(User::getId, User::getNickname));
+        return messages.stream()
+                .map(message -> messageResponse(message, operatorNames.get(message.getRecallOperatorId())))
+                .toList();
+    }
+
+    private MessageResponse messageResponse(Message message) {
+        User operator = message.getRecallOperatorId() == null
+                ? null : userMapper.selectById(message.getRecallOperatorId());
+        return messageResponse(message, operator == null ? null : operator.getNickname());
+    }
+
+    private MessageResponse messageResponse(Message message, String recallOperatorName) {
+        User sender = userMapper.selectById(message.getSenderId());
+        GroupMember senderMember = message.getChatType() == CHAT_GROUP
+                ? findMember(message.getTargetId(), message.getSenderId()) : null;
+        return MessageResponse.from(message, recallOperatorName, sender, senderMember);
     }
 
     private List<Long> resolveRecipients(long senderId, int chatType, long targetId) {
@@ -248,11 +333,15 @@ public class MessagePersistenceService {
         }
     }
 
-    private void checkRecallPermission(long currentUserId, Message message) {
+    private void checkRecallPermission(long currentUserId, Message message, LocalDateTime now) {
         if (message.getMessageType() == MESSAGE_RED_PACKET) {
             throw new BusinessException("RED_PACKET_RECALL_FORBIDDEN", "红包消息不能撤回", HttpStatus.CONFLICT);
         }
         if (message.getSenderId() == currentUserId) {
+            if (message.getCreatedTime() == null
+                    || now.isAfter(message.getCreatedTime().plusMinutes(SELF_RECALL_WINDOW_MINUTES))) {
+                throw new BusinessException("MESSAGE_RECALL_EXPIRED", "消息发送超过5分钟，无法撤回", HttpStatus.CONFLICT);
+            }
             return;
         }
         if (message.getChatType() != CHAT_GROUP) {
@@ -334,6 +423,16 @@ public class MessagePersistenceService {
         List<Long> result = new ArrayList<>(unique);
         result.sort(Long::compareTo);
         return result;
+    }
+
+    private String stringId(Long value) {
+        return value == null ? null : value.toString();
+    }
+
+    public record PreviewDelivery(
+            SendMessageCommand command,
+            MessageResponse message,
+            List<Long> recipientIds) {
     }
 
     public record PersistedMessage(

@@ -15,7 +15,7 @@ class ProfileService {
     const user = toClientUser(profile)
     authService.updateCurrentUser(user)
     databaseManager.upsertCurrentUser(user)
-    return user
+    return databaseManager.loadCachedUser(user.id, user.balance) ?? user
   }
 
   async updateAvatar(resourceId: string) {
@@ -23,7 +23,7 @@ class ProfileService {
     const user = toClientUser(profile)
     authService.updateCurrentUser(user)
     databaseManager.upsertCurrentUser(user)
-    return user
+    return databaseManager.loadCachedUser(user.id, user.balance) ?? user
   }
 }
 

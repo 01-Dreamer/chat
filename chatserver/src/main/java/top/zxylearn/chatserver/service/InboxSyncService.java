@@ -9,6 +9,7 @@ import top.zxylearn.chatserver.entity.GroupJoinRequest;
 import top.zxylearn.chatserver.entity.Message;
 import top.zxylearn.chatserver.entity.User;
 import top.zxylearn.chatserver.entity.UserInbox;
+import top.zxylearn.chatserver.entity.GroupMember;
 import top.zxylearn.chatserver.mapper.EventMapper;
 import top.zxylearn.chatserver.mapper.FriendAddRequestMapper;
 import top.zxylearn.chatserver.mapper.GroupJoinRequestMapper;
@@ -16,6 +17,7 @@ import top.zxylearn.chatserver.mapper.GroupMapper;
 import top.zxylearn.chatserver.mapper.MessageMapper;
 import top.zxylearn.chatserver.mapper.UserInboxMapper;
 import top.zxylearn.chatserver.mapper.UserMapper;
+import top.zxylearn.chatserver.mapper.GroupMemberMapper;
 import top.zxylearn.chatserver.vo.FriendRequestResponse;
 import top.zxylearn.chatserver.vo.GroupJoinRequestResponse;
 import top.zxylearn.chatserver.vo.InboxEventResponse;
@@ -41,6 +43,7 @@ public class InboxSyncService {
     private final GroupJoinRequestMapper groupRequestMapper;
     private final GroupMapper groupMapper;
     private final UserMapper userMapper;
+    private final GroupMemberMapper groupMemberMapper;
 
     public InboxSyncService(
             UserInboxMapper inboxMapper,
@@ -49,7 +52,8 @@ public class InboxSyncService {
             FriendAddRequestMapper friendRequestMapper,
             GroupJoinRequestMapper groupRequestMapper,
             GroupMapper groupMapper,
-            UserMapper userMapper) {
+            UserMapper userMapper,
+            GroupMemberMapper groupMemberMapper) {
         this.inboxMapper = inboxMapper;
         this.eventMapper = eventMapper;
         this.messageMapper = messageMapper;
@@ -57,6 +61,7 @@ public class InboxSyncService {
         this.groupRequestMapper = groupRequestMapper;
         this.groupMapper = groupMapper;
         this.userMapper = userMapper;
+        this.groupMemberMapper = groupMemberMapper;
     }
 
     public InboxSyncResponse sync(long userId, long afterSequence, int requestedLimit) {
@@ -80,6 +85,14 @@ public class InboxSyncService {
         Map<Long, Message> messages = messageIds.isEmpty()
                 ? Map.of()
                 : mapById(messageMapper.selectBatchIds(messageIds));
+        List<Long> recallOperatorIds = messages.values().stream()
+                .map(Message::getRecallOperatorId)
+                .filter(java.util.Objects::nonNull)
+                .distinct()
+                .toList();
+        Map<Long, User> recallOperators = recallOperatorIds.isEmpty()
+                ? Map.of()
+                : mapById(userMapper.selectByIds(recallOperatorIds));
         List<InboxEventResponse> items = new ArrayList<>(rows.size());
         for (UserInbox inbox : rows) {
             Event event = events.get(inbox.getEventId());
@@ -95,17 +108,35 @@ public class InboxSyncService {
                     event.getId().toString(),
                     event.getEventType(),
                     event.getReferenceId().toString(),
-                    resolvePayload(userId, event, messages),
+                    resolvePayload(userId, event, messages, recallOperators),
                     toEpochMilli(event.getCreatedTime())));
         }
         long lastSequence = items.isEmpty() ? Math.max(0, afterSequence) : items.get(items.size() - 1).sequence();
         return new InboxSyncResponse(items, lastSequence, hasMore);
     }
 
-    private Object resolvePayload(long userId, Event event, Map<Long, Message> messages) {
+    private Object resolvePayload(
+            long userId,
+            Event event,
+            Map<Long, Message> messages,
+            Map<Long, User> recallOperators) {
         if (event.getEventType() == 0 || event.getEventType() == 1) {
             Message message = messages.get(event.getReferenceId());
-            if (message != null) return MessageResponse.from(message);
+            if (message != null) {
+                User operator = recallOperators.get(message.getRecallOperatorId());
+                User sender = userMapper.selectById(message.getSenderId());
+                GroupMember senderMember = message.getChatType() == 1
+                        ? groupMemberMapper.selectOne(new LambdaQueryWrapper<GroupMember>()
+                                .eq(GroupMember::getGroupId, message.getTargetId())
+                                .eq(GroupMember::getUserId, message.getSenderId())
+                                .last("LIMIT 1"))
+                        : null;
+                return MessageResponse.from(
+                        message,
+                        operator == null ? null : operator.getNickname(),
+                        sender,
+                        senderMember);
+            }
         } else if (event.getEventType() == 2 || event.getEventType() == 3) {
             FriendAddRequest request = friendRequestMapper.selectById(event.getReferenceId());
             if (request != null) {

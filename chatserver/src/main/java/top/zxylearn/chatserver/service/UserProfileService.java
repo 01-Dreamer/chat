@@ -14,9 +14,17 @@ import top.zxylearn.chatserver.mapper.AccountMapper;
 import top.zxylearn.chatserver.mapper.UserMapper;
 import top.zxylearn.chatserver.mapper.FileResourceMapper;
 import top.zxylearn.chatserver.mapper.FileResourceAccessMapper;
+import top.zxylearn.chatserver.mapper.FriendMapper;
+import top.zxylearn.chatserver.mapper.FriendAddRequestMapper;
+import top.zxylearn.chatserver.mapper.GroupMemberMapper;
+import top.zxylearn.chatserver.mapper.GroupJoinRequestMapper;
 import top.zxylearn.chatserver.vo.UserProfileResponse;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 
 @Service
 public class UserProfileService {
@@ -25,13 +33,34 @@ public class UserProfileService {
     private final AccountMapper accountMapper;
     private final FileResourceMapper fileResourceMapper;
     private final FileResourceAccessMapper fileResourceAccessMapper;
+    private final FriendMapper friendMapper;
+    private final FriendAddRequestMapper friendAddRequestMapper;
+    private final GroupMemberMapper groupMemberMapper;
+    private final GroupJoinRequestMapper groupJoinRequestMapper;
+    private final DirectorySnapshotCache directoryCache;
+    private final ReliableEventService reliableEventService;
 
-    public UserProfileService(UserMapper userMapper, AccountMapper accountMapper, FileResourceMapper fileResourceMapper,
-                              FileResourceAccessMapper fileResourceAccessMapper) {
+    public UserProfileService(
+            UserMapper userMapper,
+            AccountMapper accountMapper,
+            FileResourceMapper fileResourceMapper,
+            FileResourceAccessMapper fileResourceAccessMapper,
+            FriendMapper friendMapper,
+            FriendAddRequestMapper friendAddRequestMapper,
+            GroupMemberMapper groupMemberMapper,
+            GroupJoinRequestMapper groupJoinRequestMapper,
+            DirectorySnapshotCache directoryCache,
+            ReliableEventService reliableEventService) {
         this.userMapper = userMapper;
         this.accountMapper = accountMapper;
         this.fileResourceMapper = fileResourceMapper;
         this.fileResourceAccessMapper = fileResourceAccessMapper;
+        this.friendMapper = friendMapper;
+        this.friendAddRequestMapper = friendAddRequestMapper;
+        this.groupMemberMapper = groupMemberMapper;
+        this.groupJoinRequestMapper = groupJoinRequestMapper;
+        this.directoryCache = directoryCache;
+        this.reliableEventService = reliableEventService;
     }
 
     @Transactional
@@ -42,8 +71,10 @@ public class UserProfileService {
             throw new BusinessException("USER_NOT_FOUND", "用户不存在", HttpStatus.UNAUTHORIZED);
         }
         user.setNickname(nickname.trim());
-        user.setUpdatedTime(LocalDateTime.now());
+        LocalDateTime now = LocalDateTime.now();
+        user.setUpdatedTime(now);
         userMapper.updateById(user);
+        notifyProfileChanged(currentUserId, now);
         Account account = accountMapper.selectOne(new LambdaQueryWrapper<Account>()
                 .eq(Account::getUserId, currentUserId)
                 .last("LIMIT 1"));
@@ -68,10 +99,60 @@ public class UserProfileService {
         User user = userMapper.selectById(currentUserId);
         if (user == null) throw new BusinessException("USER_NOT_FOUND", "用户不存在", HttpStatus.UNAUTHORIZED);
         user.setAvatarUrl(resource.getFileUrl());
-        user.setUpdatedTime(LocalDateTime.now());
+        LocalDateTime now = LocalDateTime.now();
+        user.setUpdatedTime(now);
         userMapper.updateById(user);
+        notifyProfileChanged(currentUserId, now);
         Account account = accountMapper.selectOne(new LambdaQueryWrapper<Account>()
                 .eq(Account::getUserId, currentUserId).last("LIMIT 1"));
         return UserProfileResponse.from(user, account);
+    }
+
+    private void notifyProfileChanged(long userId, LocalDateTime now) {
+        Set<Long> recipients = new LinkedHashSet<>();
+        recipients.add(userId);
+        friendMapper.selectList(new LambdaQueryWrapper<top.zxylearn.chatserver.entity.Friend>()
+                        .eq(top.zxylearn.chatserver.entity.Friend::getFriendId, userId))
+                .forEach(friend -> recipients.add(friend.getUserId()));
+        friendAddRequestMapper.selectList(
+                        new LambdaQueryWrapper<top.zxylearn.chatserver.entity.FriendAddRequest>()
+                                .and(query -> query
+                                        .eq(top.zxylearn.chatserver.entity.FriendAddRequest::getSenderId, userId)
+                                        .or()
+                                        .eq(top.zxylearn.chatserver.entity.FriendAddRequest::getReceiverId, userId)))
+                .forEach(request -> recipients.add(
+                        request.getSenderId() == userId ? request.getReceiverId() : request.getSenderId()));
+        List<Long> groupIds = groupMemberMapper.selectList(
+                        new LambdaQueryWrapper<top.zxylearn.chatserver.entity.GroupMember>()
+                                .eq(top.zxylearn.chatserver.entity.GroupMember::getUserId, userId))
+                .stream().map(top.zxylearn.chatserver.entity.GroupMember::getGroupId).toList();
+        for (Long groupId : groupIds) {
+            directoryCache.evict(directoryCache.groupMembersKey(groupId));
+            groupMemberMapper.selectList(new LambdaQueryWrapper<top.zxylearn.chatserver.entity.GroupMember>()
+                            .eq(top.zxylearn.chatserver.entity.GroupMember::getGroupId, groupId))
+                    .forEach(member -> {
+                        recipients.add(member.getUserId());
+                        directoryCache.evict(directoryCache.groupsKey(member.getUserId()));
+                    });
+        }
+        groupJoinRequestMapper.selectList(
+                        new LambdaQueryWrapper<top.zxylearn.chatserver.entity.GroupJoinRequest>()
+                                .eq(top.zxylearn.chatserver.entity.GroupJoinRequest::getUserId, userId))
+                .forEach(request -> groupMemberMapper.selectList(
+                                new LambdaQueryWrapper<top.zxylearn.chatserver.entity.GroupMember>()
+                                        .eq(top.zxylearn.chatserver.entity.GroupMember::getGroupId, request.getGroupId())
+                                        .in(top.zxylearn.chatserver.entity.GroupMember::getRole, 1, 2))
+                        .forEach(manager -> {
+                            recipients.add(manager.getUserId());
+                            directoryCache.evict(directoryCache.groupRequestsKey(manager.getUserId()));
+                        }));
+        directoryCache.evict(directoryCache.groupRequestsKey(userId));
+        List<String> friendKeys = new ArrayList<>();
+        for (Long recipient : recipients) {
+            friendKeys.add(directoryCache.friendsKey(recipient));
+            friendKeys.add(directoryCache.friendRequestsKey(recipient));
+        }
+        directoryCache.evict(friendKeys.toArray(String[]::new));
+        reliableEventService.append(6, userId, recipients, now);
     }
 }

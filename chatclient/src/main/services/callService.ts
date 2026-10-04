@@ -11,6 +11,10 @@ class CallService {
     return apiClient.patch<CallRecord>(`/calls/${callId}`, { action })
   }
 
+  get(callId: string) {
+    return apiClient.get<CallRecord>(`/calls/${callId}`)
+  }
+
   iceServers() {
     return apiClient.get<{ iceServers: RTCIceServer[] }>('/calls/ice-servers')
   }

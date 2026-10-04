@@ -7,7 +7,6 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import top.zxylearn.chatserver.dto.wallet.CreateRedPacketRequest;
-import top.zxylearn.chatserver.dto.wallet.TransferRequest;
 import top.zxylearn.chatserver.entity.Account;
 import top.zxylearn.chatserver.entity.AccountTransaction;
 import top.zxylearn.chatserver.entity.Friend;
@@ -25,11 +24,9 @@ import top.zxylearn.chatserver.mapper.GroupMemberMapper;
 import top.zxylearn.chatserver.mapper.NotificationMapper;
 import top.zxylearn.chatserver.mapper.RedPacketMapper;
 import top.zxylearn.chatserver.mapper.RedPacketReceiveMapper;
-import top.zxylearn.chatserver.mapper.UserMapper;
 import top.zxylearn.chatserver.vo.AccountResponse;
 import top.zxylearn.chatserver.vo.RedPacketClaimResponse;
 import top.zxylearn.chatserver.vo.RedPacketResponse;
-import top.zxylearn.chatserver.vo.TransactionResponse;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -47,7 +44,6 @@ public class WalletService {
     private final RedPacketMapper redPacketMapper;
     private final RedPacketReceiveMapper receiveMapper;
     private final NotificationMapper notificationMapper;
-    private final UserMapper userMapper;
     private final FriendMapper friendMapper;
     private final GroupMapper groupMapper;
     private final GroupMemberMapper memberMapper;
@@ -60,7 +56,6 @@ public class WalletService {
             RedPacketMapper redPacketMapper,
             RedPacketReceiveMapper receiveMapper,
             NotificationMapper notificationMapper,
-            UserMapper userMapper,
             FriendMapper friendMapper,
             GroupMapper groupMapper,
             GroupMemberMapper memberMapper,
@@ -70,7 +65,6 @@ public class WalletService {
         this.redPacketMapper = redPacketMapper;
         this.receiveMapper = receiveMapper;
         this.notificationMapper = notificationMapper;
-        this.userMapper = userMapper;
         this.friendMapper = friendMapper;
         this.groupMapper = groupMapper;
         this.memberMapper = memberMapper;
@@ -92,31 +86,6 @@ public class WalletService {
         account.setUpdatedTime(LocalDateTime.now());
         accountMapper.updateById(account);
         return AccountResponse.from(account);
-    }
-
-    @Transactional
-    public TransactionResponse transfer(long senderId, TransferRequest request) {
-        AccountTransaction existing = transactionMapper.selectByClientId(senderId, request.clientTransactionId());
-        if (existing != null) return TransactionResponse.from(existing);
-        long receiverId = parseId(request.recipientUserId(), "INVALID_RECIPIENT", "收款用户ID不正确");
-        if (receiverId == senderId) throw new BusinessException("CANNOT_TRANSFER_SELF", "不能给自己转账", HttpStatus.BAD_REQUEST);
-        if (userMapper.selectById(receiverId) == null) throw new BusinessException("USER_NOT_FOUND", "收款用户不存在", HttpStatus.NOT_FOUND);
-        requireFriends(senderId, receiverId);
-        BigDecimal amount = parseAmount(request.amount());
-        Account sender = lockFirstAccount(senderId, receiverId, true);
-        Account receiver = lockFirstAccount(senderId, receiverId, false);
-        verifyPayment(sender, request.payPassword(), amount);
-        LocalDateTime now = LocalDateTime.now();
-        sender.setBalance(sender.getBalance().subtract(amount));
-        receiver.setBalance(receiver.getBalance().add(amount));
-        sender.setUpdatedTime(now);
-        receiver.setUpdatedTime(now);
-        accountMapper.updateById(sender);
-        accountMapper.updateById(receiver);
-        AccountTransaction transaction = transaction(
-                request.clientTransactionId(), senderId, receiverId, 0, amount, null, now);
-        createNotification(receiverId, 3, transaction.getId(), "收到转账", "收到一笔 " + amount.toPlainString() + " 元转账", now);
-        return TransactionResponse.from(transaction);
     }
 
     @Transactional
@@ -247,16 +216,6 @@ public class WalletService {
         long upper = Math.max(1, Math.min(maxByBalance, twiceAverage));
         long cents = 1 + random.nextLong(upper);
         return BigDecimal.valueOf(cents, 2);
-    }
-
-    private Account lockFirstAccount(long senderId, long receiverId, boolean senderRequested) {
-        long first = Math.min(senderId, receiverId);
-        long second = Math.max(senderId, receiverId);
-        Account firstAccount = requireAccountForUpdate(first);
-        Account secondAccount = requireAccountForUpdate(second);
-        return senderRequested
-                ? (senderId == first ? firstAccount : secondAccount)
-                : (receiverId == first ? firstAccount : secondAccount);
     }
 
     private void verifyPayment(Account account, String payPassword, BigDecimal amount) {

@@ -12,31 +12,38 @@ export interface CallSignal {
 export const useCallStore = defineStore('call', () => {
   const current = ref<CallRecord | null>(null)
   const incoming = ref(false)
-  const signal = ref<CallSignal | null>(null)
+  const signals = ref<CallSignal[]>([])
   const signalVersion = ref(0)
 
   async function start(calleeId: string, callType: number) {
+    if (current.value) throw new Error('当前已有正在进行的通话')
     current.value = await window.chatApi.createCall(calleeId, callType)
     incoming.value = false
   }
   function receive(eventType: string, data: unknown) {
     if (eventType === 'CALL_INVITE') {
-      if (!current.value) {
-        current.value = data as CallRecord
+      const call = data as CallRecord
+      if (!current.value || current.value.id === call.id) {
+        current.value = call
         incoming.value = true
       }
     } else if (eventType === 'CALL_STATUS') {
       const call = data as CallRecord
       if (current.value?.id === call.id) current.value = call
     } else if (eventType === 'WEBRTC_SIGNAL') {
-      signal.value = data as CallSignal
+      signals.value.push(data as CallSignal)
       signalVersion.value++
     }
+  }
+  function takeSignals(callId: string) {
+    const matching = signals.value.filter((item) => item.callId === callId)
+    signals.value = signals.value.filter((item) => item.callId !== callId)
+    return matching
   }
   function clear() {
     current.value = null
     incoming.value = false
-    signal.value = null
+    signals.value = []
   }
-  return { current, incoming, signal, signalVersion, start, receive, clear }
+  return { current, incoming, signalVersion, start, receive, takeSignals, clear }
 })

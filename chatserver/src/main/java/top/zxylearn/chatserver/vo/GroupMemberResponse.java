@@ -15,7 +15,8 @@ public record GroupMemberResponse(
         String nickname,
         String avatarUrl,
         long createdTime,
-        long updatedTime) {
+        long updatedTime,
+        long userUpdatedTime) {
 
     public static GroupMemberResponse from(GroupMember member, User user) {
         return new GroupMemberResponse(
@@ -28,6 +29,7 @@ public record GroupMemberResponse(
                 user.getNickname(),
                 user.getAvatarUrl(),
                 toEpochMilli(member.getCreatedTime()),
-                toEpochMilli(member.getUpdatedTime()));
+                toEpochMilli(member.getUpdatedTime()),
+                toEpochMilli(user.getUpdatedTime()));
     }
 }

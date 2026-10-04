@@ -2,7 +2,7 @@ import { app } from 'electron'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { AppNotification, Conversation, FileResource, Friend, FriendRequest, GroupChat, GroupMember, Message, RedPacket, ServerMessage, User } from '../types'
+import type { AppNotification, Conversation, FileResource, Friend, FriendRequest, GroupChat, GroupMember, Message, MessagePage, MessagePageCursor, RedPacket, ServerMessage, User } from '../types'
 import { initializeDatabase } from './migrations'
 
 class DatabaseManager {
@@ -51,6 +51,25 @@ class DatabaseManager {
     )
   }
 
+  loadCachedUser(userId: string, balance = '0.00'): User | null {
+    const row = this.requireDatabase().prepare(`
+      SELECT id, username, nickname, COALESCE(avatar_local_path, avatar_url) AS avatar,
+             status, created_time, updated_time
+      FROM user WHERE id = ?
+    `).get(userId) as Record<string, unknown> | undefined
+    if (!row) return null
+    return {
+      id: String(row.id),
+      username: String(row.username ?? ''),
+      nickname: String(row.nickname),
+      avatar: row.avatar as string | null,
+      balance,
+      status: Number(row.status),
+      createdTime: Number(row.created_time),
+      updatedTime: Number(row.updated_time),
+    }
+  }
+
   syncFriendData(friends: Friend[], requests: FriendRequest[]) {
     const database = this.requireDatabase()
     database.exec('BEGIN IMMEDIATE')
@@ -64,11 +83,12 @@ class DatabaseManager {
     }
   }
 
-  syncFriends(friends: Friend[]) {
+  syncFriends(friends: Friend[], version?: string) {
     const database = this.requireDatabase()
     database.exec('BEGIN IMMEDIATE')
     try {
       this.replaceFriends(database, friends)
+      if (version) this.setDirectoryVersion(database, 'friends', version)
       database.exec('COMMIT')
     } catch (error) {
       database.exec('ROLLBACK')
@@ -76,11 +96,12 @@ class DatabaseManager {
     }
   }
 
-  syncFriendRequests(requests: FriendRequest[]) {
+  syncFriendRequests(requests: FriendRequest[], version?: string) {
     const database = this.requireDatabase()
     database.exec('BEGIN IMMEDIATE')
     try {
       this.replaceFriendRequests(database, requests)
+      if (version) this.setDirectoryVersion(database, 'friend-requests', version)
       database.exec('COMMIT')
     } catch (error) {
       database.exec('ROLLBACK')
@@ -131,20 +152,71 @@ class DatabaseManager {
 
   loadCachedGroups(): GroupChat[] {
     const rows = this.requireDatabase().prepare(`
-      SELECT g.*, COALESCE(g.avatar_local_path, g.avatar_url) AS display_avatar, s.remark, gm.role, gm.nickname AS my_nickname,
-        (SELECT COUNT(*) FROM group_member x WHERE x.group_id = g.id) AS member_count,
-        owner.nickname AS owner_name
+      SELECT g.*, COALESCE(g.avatar_local_path, g.avatar_url) AS display_avatar, s.remark
       FROM \`group\` g
       LEFT JOIN user_group_setting s ON s.group_id = g.id
-      LEFT JOIN group_member gm ON gm.group_id = g.id AND gm.user_id = ?
-      LEFT JOIN user owner ON owner.id = g.owner_id
       WHERE g.status = 1 ORDER BY g.updated_time DESC
-    `).all(this.currentUserId) as Array<Record<string, unknown>>
+    `).all() as Array<Record<string, unknown>>
     return rows.map((row) => ({
       id: String(row.id), groupNumber: String(row.id), name: String(row.name), avatar: row.display_avatar as string | null,
       memberCount: Number(row.member_count), description: '', owner: String(row.owner_name ?? '群主'), ownerId: String(row.owner_id),
-      remark: String(row.remark ?? ''), status: Number(row.status), currentUserRole: Number(row.role ?? 0),
-      currentUserNickname: String(row.my_nickname ?? ''), createdTime: Number(row.created_time), updatedTime: Number(row.updated_time),
+      remark: String(row.remark ?? ''), status: Number(row.status), currentUserRole: Number(row.current_user_role ?? 0),
+      currentUserNickname: String(row.current_user_nickname ?? ''), createdTime: Number(row.created_time), updatedTime: Number(row.updated_time),
+    }))
+  }
+
+  loadCachedGroupMembers(groupId: string): GroupMember[] {
+    const rows = this.requireDatabase().prepare(`
+      SELECT gm.*, u.username, u.nickname AS user_nickname,
+             COALESCE(u.avatar_local_path, u.avatar_url) AS avatar_url,
+             u.updated_time AS user_updated_time
+      FROM group_member gm
+      JOIN user u ON u.id = gm.user_id
+      WHERE gm.group_id = ?
+      ORDER BY gm.role DESC, gm.created_time ASC
+    `).all(groupId) as Array<Record<string, unknown>>
+    return rows.map((row) => ({
+      id: String(row.id),
+      groupId: String(row.group_id),
+      userId: String(row.user_id),
+      role: Number(row.role),
+      groupNickname: String(row.nickname ?? ''),
+      username: String(row.username ?? ''),
+      nickname: String(row.user_nickname ?? '用户'),
+      avatar: row.avatar_url as string | null,
+      createdTime: Number(row.created_time),
+      updatedTime: Number(row.updated_time),
+      userUpdatedTime: Number(row.user_updated_time),
+    }))
+  }
+
+  loadCachedGroupJoinRequests(): FriendRequest[] {
+    const rows = this.requireDatabase().prepare(`
+      SELECT r.*, g.name AS group_name, u.username, u.nickname,
+             COALESCE(u.avatar_local_path, u.avatar_url) AS avatar_url
+      FROM group_join_request r
+      LEFT JOIN \`group\` g ON g.id = r.group_id
+      LEFT JOIN user u ON u.id = r.user_id
+      ORDER BY r.created_time DESC
+    `).all() as Array<Record<string, unknown>>
+    return rows.map((row) => ({
+      id: String(row.id),
+      requestType: 'group',
+      direction: String(row.user_id) === this.currentUserId ? 'outgoing' : 'incoming',
+      nickname: String(row.nickname ?? '用户'),
+      username: String(row.username ?? ''),
+      groupName: String(row.group_name ?? '群聊'),
+      groupNumber: String(row.group_id),
+      applicantNickname: String(row.nickname ?? '用户'),
+      applicantAvatar: row.avatar_url as string | null,
+      avatar: row.avatar_url as string | null,
+      message: String(row.message ?? ''),
+      time: new Date(Number(row.created_time)).toLocaleString('zh-CN', { hour12: false }),
+      status: Number(row.status) === 0 ? 'pending' : Number(row.status) === 1 ? 'accepted' : 'rejected',
+      senderId: String(row.user_id),
+      receiverId: row.reviewer_id == null ? undefined : String(row.reviewer_id),
+      createdTime: Number(row.created_time),
+      updatedTime: Number(row.updated_time),
     }))
   }
 
@@ -154,7 +226,7 @@ class DatabaseManager {
     try {
       database.exec('DELETE FROM notification')
       const statement = database.prepare(`INSERT INTO notification (id, notification_type, title, content, is_read, created_time, updated_time) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-      const types: Record<AppNotification['type'], number> = { friend_request: 0, friend_accepted: 0, group_joined: 1, red_packet: 2, transfer: 3, system: 3 }
+      const types: Record<AppNotification['type'], number> = { friend_request: 0, friend_accepted: 0, group_joined: 1, red_packet: 2, system: 3 }
       for (const item of items) {
         const time = Date.parse(item.time) || Date.now()
         statement.run(item.id, types[item.type], item.title, item.content, item.read ? 1 : 0, time, time)
@@ -168,7 +240,7 @@ class DatabaseManager {
     const rows = this.requireDatabase().prepare(`SELECT * FROM notification ORDER BY created_time DESC`).all() as Array<Record<string, unknown>>
     return rows.map((row) => {
       const title = String(row.title ?? '通知')
-      return { id: String(row.id), type: Number(row.notification_type) === 3 && title.includes('转账') ? 'transfer' : types[Number(row.notification_type)] ?? 'system', title, content: String(row.content ?? ''), time: new Date(Number(row.created_time)).toLocaleString('zh-CN', { hour12: false }), read: Number(row.is_read) === 1 }
+      return { id: String(row.id), type: types[Number(row.notification_type)] ?? 'system', title, content: String(row.content ?? ''), time: new Date(Number(row.created_time)).toLocaleString('zh-CN', { hour12: false }), read: Number(row.is_read) === 1 }
     })
   }
 
@@ -186,11 +258,12 @@ class DatabaseManager {
     return row?.avatar ?? null
   }
 
-  syncGroupJoinRequests(requests: FriendRequest[]) {
+  syncGroupJoinRequests(requests: FriendRequest[], version?: string) {
     const database = this.requireDatabase()
     database.exec('BEGIN IMMEDIATE')
     try {
       this.replaceGroupJoinRequests(database, requests)
+      if (version) this.setDirectoryVersion(database, 'group-requests', version)
       database.exec('COMMIT')
     } catch (error) {
       database.exec('ROLLBACK')
@@ -198,7 +271,7 @@ class DatabaseManager {
     }
   }
 
-  syncGroupMembers(groupId: string, members: GroupMember[]) {
+  syncGroupMembers(groupId: string, members: GroupMember[], version?: string) {
     const database = this.requireDatabase()
     database.exec('BEGIN IMMEDIATE')
     try {
@@ -215,9 +288,10 @@ class DatabaseManager {
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `)
       for (const member of members) {
-        upsertUser.run(member.userId, member.username, member.nickname, member.avatar, member.createdTime, member.updatedTime)
+        upsertUser.run(member.userId, member.username, member.nickname, member.avatar, member.createdTime, member.userUpdatedTime)
         insertMember.run(member.id, member.groupId, member.userId, member.role, member.groupNickname || null, member.createdTime, member.updatedTime)
       }
+      if (version) this.setDirectoryVersion(database, `group-members:${groupId}`, version)
       database.exec('COMMIT')
     } catch (error) {
       database.exec('ROLLBACK')
@@ -227,6 +301,27 @@ class DatabaseManager {
 
   upsertGroup(group: GroupChat) {
     this.upsertGroupRecord(this.requireDatabase(), group)
+  }
+
+  syncGroups(groups: GroupChat[], version?: string) {
+    const database = this.requireDatabase()
+    database.exec('BEGIN IMMEDIATE')
+    try {
+      database.exec('UPDATE `group` SET status = 0')
+      for (const group of groups) this.upsertGroupRecord(database, group)
+      if (version) this.setDirectoryVersion(database, 'groups', version)
+      database.exec('COMMIT')
+    } catch (error) {
+      database.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  getDirectoryVersion(syncKey: string) {
+    const row = this.requireDatabase().prepare(`
+      SELECT version FROM directory_sync_state WHERE sync_key = ?
+    `).get(syncKey) as { version?: string } | undefined
+    return row?.version ?? ''
   }
 
   saveCreatedGroup(group: GroupChat, conversation: Conversation) {
@@ -321,6 +416,19 @@ class DatabaseManager {
     return this.toUiMessage(message)
   }
 
+  applyPreviewMessage(message: ServerMessage) {
+    const database = this.requireDatabase()
+    database.exec('BEGIN IMMEDIATE')
+    try {
+      this.upsertServerMessage(database, message, true, true, 3)
+      database.exec('COMMIT')
+    } catch (error) {
+      database.exec('ROLLBACK')
+      throw error
+    }
+    return this.toUiMessage(message, 'queued')
+  }
+
   applyInboxMessage(message: ServerMessage, sequence: number) {
     const database = this.requireDatabase()
     database.exec('BEGIN IMMEDIATE')
@@ -335,41 +443,90 @@ class DatabaseManager {
     return this.toUiMessage(message)
   }
 
-  applyHistory(messages: ServerMessage[]) {
-    const database = this.requireDatabase()
-    database.exec('BEGIN IMMEDIATE')
-    try {
-      // Opening history must never turn old messages into unread messages.
-      for (const message of messages) this.upsertServerMessage(database, message, false, false)
-      database.exec('COMMIT')
-    } catch (error) { database.exec('ROLLBACK'); throw error }
-  }
-
-  loadConversationMessages(chatKey: string) {
-    const rows = this.requireDatabase().prepare(`
-      SELECT m.*, u.nickname AS sender_name, u.avatar_url AS sender_avatar,
-             recaller.nickname AS recall_operator_name
+  loadConversationMessages(chatKey: string, cursor: MessagePageCursor | null = null, pageSize = 50): MessagePage {
+    const limit = Math.min(Math.max(Math.trunc(pageSize) || 50, 1), 100)
+    const baseQuery = `
+      SELECT m.*, COALESCE(gm.nickname, u.nickname) AS sender_name,
+             COALESCE(u.avatar_local_path, u.avatar_url) AS sender_avatar,
+             COALESCE(m.recall_operator_name, recaller.nickname) AS recall_operator_display_name
       FROM message m
       LEFT JOIN user u ON u.id = m.sender_id
+      LEFT JOIN group_member gm ON m.chat_type = 1 AND gm.group_id = m.target_id AND gm.user_id = m.sender_id
       LEFT JOIN user recaller ON recaller.id = m.recall_operator_id
-      WHERE m.chat_key = ? ORDER BY m.created_time ASC, m.local_id ASC
-    `).all(chatKey) as Array<Record<string, unknown>>
-    return rows.map((row) => this.localRowToUiMessage(row))
+      WHERE m.chat_key = ?`
+    const rows = (cursor
+      ? this.requireDatabase().prepare(`${baseQuery}
+          AND (m.created_time < ? OR (m.created_time = ? AND m.local_id < ?))
+          ORDER BY m.created_time DESC, m.local_id DESC LIMIT ?
+        `).all(chatKey, cursor.createdAt, cursor.createdAt, cursor.localId, limit + 1)
+      : this.requireDatabase().prepare(`${baseQuery}
+          ORDER BY m.created_time DESC, m.local_id DESC LIMIT ?
+        `).all(chatKey, limit + 1)) as Array<Record<string, unknown>>
+    const hasMore = rows.length > limit
+    const pageRows = rows.slice(0, limit)
+    const oldest = pageRows.at(-1)
+    return {
+      messages: pageRows.reverse().map((row) => this.localRowToUiMessage(row)),
+      nextCursor: hasMore && oldest
+        ? { createdAt: Number(oldest.created_time), localId: Number(oldest.local_id) }
+        : null,
+      hasMore,
+    }
   }
 
   markMessageFailed(clientMessageId: string) {
     this.requireDatabase().prepare(`
-      UPDATE message SET send_status = 2, updated_time = ? WHERE client_message_id = ?
+      UPDATE message SET send_status = 2, updated_time = ?
+      WHERE client_message_id = ? AND send_status <> 1
     `).run(Date.now(), clientMessageId)
+  }
+
+  markMessageQueued(clientMessageId: string) {
+    this.requireDatabase().prepare(`
+      UPDATE message SET send_status = 3, updated_time = ?
+      WHERE client_message_id = ? AND send_status = 0
+    `).run(Date.now(), clientMessageId)
+  }
+
+  removePreviewMessage(senderId: string, clientMessageId: string) {
+    const database = this.requireDatabase()
+    const row = database.prepare(`
+      SELECT chat_key, created_time FROM message
+      WHERE sender_id = ? AND client_message_id = ? AND send_status = 3 LIMIT 1
+    `).get(senderId, clientMessageId) as { chat_key?: string, created_time?: number } | undefined
+    if (!row?.chat_key) return null
+    database.exec('BEGIN IMMEDIATE')
+    try {
+      database.prepare(`
+        DELETE FROM message WHERE sender_id = ? AND client_message_id = ? AND send_status = 3
+      `).run(senderId, clientMessageId)
+      const session = database.prepare(`
+        SELECT last_read_time FROM session WHERE chat_key = ? LIMIT 1
+      `).get(row.chat_key) as { last_read_time?: number } | undefined
+      const wasUnread = row.chat_key !== this.activeChatKey
+        && Number(row.created_time ?? 0) > Number(session?.last_read_time ?? 0)
+      if (wasUnread) {
+        database.prepare(`
+          UPDATE session SET unread_count = MAX(0, unread_count - 1), updated_time = ? WHERE chat_key = ?
+        `).run(Date.now(), row.chat_key)
+      }
+      database.exec('COMMIT')
+      return row.chat_key
+    } catch (error) {
+      database.exec('ROLLBACK')
+      throw error
+    }
   }
 
   prepareMessageRetry(clientMessageId: string) {
     const database = this.requireDatabase()
     const row = database.prepare(`
-      SELECT m.*, u.nickname AS sender_name, u.avatar_url AS sender_avatar,
-             recaller.nickname AS recall_operator_name
+      SELECT m.*, COALESCE(gm.nickname, u.nickname) AS sender_name,
+             COALESCE(u.avatar_local_path, u.avatar_url) AS sender_avatar,
+             COALESCE(m.recall_operator_name, recaller.nickname) AS recall_operator_display_name
       FROM message m
       LEFT JOIN user u ON u.id = m.sender_id
+      LEFT JOIN group_member gm ON m.chat_type = 1 AND gm.group_id = m.target_id AND gm.user_id = m.sender_id
       LEFT JOIN user recaller ON recaller.id = m.recall_operator_id
       WHERE m.client_message_id = ? AND m.sender_id = ? LIMIT 1
     `).get(clientMessageId, this.currentUserId) as Record<string, unknown> | undefined
@@ -408,25 +565,6 @@ class DatabaseManager {
       database.exec('ROLLBACK')
       throw error
     }
-  }
-
-  loadChatState(): { conversations: Conversation[], messages: Record<string, Message[]> } {
-    const database = this.requireDatabase()
-    const conversations = this.loadConversations()
-    const messages: Record<string, Message[]> = {}
-    const statement = database.prepare(`
-      SELECT m.*, u.nickname AS sender_name, u.avatar_url AS sender_avatar,
-             recaller.nickname AS recall_operator_name
-      FROM message m
-      LEFT JOIN user u ON u.id = m.sender_id
-      LEFT JOIN user recaller ON recaller.id = m.recall_operator_id
-      WHERE m.chat_key = ? ORDER BY m.created_time ASC, m.local_id ASC
-    `)
-    for (const conversation of conversations) {
-      const messageRows = statement.all(conversation.id) as Array<Record<string, unknown>>
-      messages[conversation.id] = messageRows.map((row) => this.localRowToUiMessage(row))
-    }
-    return { conversations, messages }
   }
 
   loadSessionState(): { conversations: Conversation[], messages: Record<string, Message[]> } {
@@ -604,7 +742,7 @@ class DatabaseManager {
           request.nickname,
           request.avatar,
           request.createdTime || now,
-          request.updatedTime || now,
+          request.userUpdatedTime || request.updatedTime || now,
         )
       }
       insertRequest.run(
@@ -621,13 +759,22 @@ class DatabaseManager {
 
   private upsertGroupRecord(database: DatabaseSync, group: GroupChat) {
     database.prepare(`
-      INSERT INTO \`group\` (id, name, avatar_url, owner_id, status, created_time, updated_time)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO \`group\` (
+        id, name, avatar_url, owner_id, owner_name, member_count,
+        current_user_role, current_user_nickname, status, created_time, updated_time
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET name=excluded.name,
         avatar_local_path=CASE WHEN avatar_url IS excluded.avatar_url THEN avatar_local_path ELSE NULL END,
         avatar_url=excluded.avatar_url,
-        owner_id=excluded.owner_id, status=excluded.status, updated_time=excluded.updated_time
-    `).run(group.id, group.name, group.avatar, group.ownerId, group.status, group.createdTime, group.updatedTime)
+        owner_id=excluded.owner_id, owner_name=excluded.owner_name,
+        member_count=excluded.member_count, current_user_role=excluded.current_user_role,
+        current_user_nickname=excluded.current_user_nickname,
+        status=excluded.status, updated_time=excluded.updated_time
+    `).run(
+      group.id, group.name, group.avatar, group.ownerId, group.owner,
+      group.memberCount, group.currentUserRole, group.currentUserNickname || null,
+      group.status, group.createdTime, group.updatedTime,
+    )
     database.prepare(`
       INSERT INTO user_group_setting (id, group_id, remark, created_time, updated_time)
       VALUES (?, ?, ?, ?, ?)
@@ -637,12 +784,31 @@ class DatabaseManager {
 
   private replaceGroupJoinRequests(database: DatabaseSync, requests: FriendRequest[]) {
     database.exec('DELETE FROM group_join_request')
+    const upsertUser = database.prepare(`
+      INSERT INTO user (id, username, nickname, avatar_url, status, created_time, updated_time)
+      VALUES (?, ?, ?, ?, 1, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        username=excluded.username,
+        nickname=excluded.nickname,
+        avatar_local_path=CASE WHEN avatar_url IS excluded.avatar_url THEN avatar_local_path ELSE NULL END,
+        avatar_url=excluded.avatar_url,
+        updated_time=excluded.updated_time
+    `)
     const statement = database.prepare(`
       INSERT INTO group_join_request (id, group_id, user_id, message, status, reviewer_id, created_time, updated_time)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `)
     for (const request of requests.filter((item) => item.requestType === 'group')) {
       if (!request.groupNumber || !request.senderId) throw new Error('入群申请缺少群聊或用户标识')
+      const now = Date.now()
+      upsertUser.run(
+        request.senderId,
+        request.username,
+        request.applicantNickname || request.nickname,
+        request.applicantAvatar ?? request.avatar,
+        request.createdTime ?? now,
+        request.userUpdatedTime ?? request.updatedTime ?? now,
+      )
       statement.run(
         request.id,
         request.groupNumber,
@@ -661,31 +827,38 @@ class DatabaseManager {
     message: ServerMessage,
     forceIncomingDelivery = false,
     countUnread = true,
+    sendStatus = 1,
   ) {
+    this.applySenderDirectorySnapshot(database, message)
     const existing = database.prepare(`
-      SELECT 1 FROM message WHERE id = ? OR (sender_id = ? AND client_message_id = ?) LIMIT 1
-    `).get(message.id, message.senderId, message.clientMessageId)
+      SELECT send_status FROM message WHERE id = ? OR (sender_id = ? AND client_message_id = ?) LIMIT 1
+    `).get(message.id, message.senderId, message.clientMessageId) as { send_status?: number } | undefined
+    if (sendStatus === 3 && Number(existing?.send_status) === 1) return
     const sessionState = database.prepare(`
       SELECT last_read_time FROM session WHERE chat_key = ? LIMIT 1
     `).get(message.chatKey) as { last_read_time?: number } | undefined
     database.prepare(`
       INSERT INTO message (
         id, client_message_id, chat_key, sender_id, chat_type, target_id, message_type,
-        content, reference_id, reply_message_id, status, recall_operator_id, recalled_time,
+        content, reference_id, reply_message_id, status, recall_operator_id, recall_operator_name, recalled_time,
         send_status, created_time, updated_time
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(sender_id, client_message_id) DO UPDATE SET
         id=excluded.id,
         content=CASE WHEN excluded.status = 1 THEN NULL ELSE excluded.content END,
         reference_id=excluded.reference_id,
         reply_message_id=excluded.reply_message_id, status=excluded.status,
-        recall_operator_id=excluded.recall_operator_id, recalled_time=excluded.recalled_time,
-        send_status=1, updated_time=excluded.updated_time
+        recall_operator_id=excluded.recall_operator_id,
+        recall_operator_name=excluded.recall_operator_name,
+        recalled_time=excluded.recalled_time,
+        send_status=CASE WHEN message.send_status = 1 THEN 1 ELSE excluded.send_status END,
+        updated_time=excluded.updated_time
     `).run(
       message.id, message.clientMessageId, message.chatKey, message.senderId,
       message.chatType, message.targetId, message.messageType, message.status === 1 ? null : message.content,
       message.referenceId, message.replyMessageId, message.status,
-      message.recallOperatorId, message.recalledTime, message.createdTime, message.updatedTime,
+      message.recallOperatorId, message.recallOperatorName, message.recalledTime,
+      sendStatus, message.createdTime, message.updatedTime,
     )
     const targetId = message.chatType === 0
       ? (message.senderId === this.currentUserId ? message.targetId : message.senderId)
@@ -767,8 +940,14 @@ class DatabaseManager {
     }
   }
 
-  private toUiMessage(message: ServerMessage): Message {
-    const user = this.requireDatabase().prepare(`SELECT nickname, avatar_url FROM user WHERE id = ?`).get(message.senderId) as { nickname?: string, avatar_url?: string | null } | undefined
+  private toUiMessage(message: ServerMessage, sendStatus: Message['sendStatus'] = 'success'): Message {
+    const user = this.requireDatabase().prepare(`
+      SELECT COALESCE(gm.nickname, u.nickname) AS nickname,
+             COALESCE(u.avatar_local_path, u.avatar_url) AS avatar_url
+      FROM user u
+      LEFT JOIN group_member gm ON ? = 1 AND gm.group_id = ? AND gm.user_id = u.id
+      WHERE u.id = ?
+    `).get(message.chatType, message.targetId, message.senderId) as { nickname?: string, avatar_url?: string | null } | undefined
     const operator = message.recallOperatorId
       ? this.requireDatabase().prepare('SELECT nickname FROM user WHERE id = ?').get(message.recallOperatorId) as { nickname?: string } | undefined
       : undefined
@@ -794,8 +973,8 @@ class DatabaseManager {
       createdAt: message.createdTime,
       status: message.status,
       recallOperatorId: message.recallOperatorId,
-      recallOperatorName: operator?.nickname ?? null,
-      sendStatus: 'success',
+      recallOperatorName: message.recallOperatorName ?? operator?.nickname ?? null,
+      sendStatus,
     }
   }
 
@@ -822,8 +1001,56 @@ class DatabaseManager {
       createdAt: Number(row.created_time),
       status: Number(row.status),
       recallOperatorId: row.recall_operator_id == null ? null : String(row.recall_operator_id),
-      recallOperatorName: row.recall_operator_name == null ? null : String(row.recall_operator_name),
-      sendStatus: Number(row.send_status) === 0 ? 'sending' : Number(row.send_status) === 1 ? 'success' : 'failed',
+      recallOperatorName: row.recall_operator_display_name == null ? null : String(row.recall_operator_display_name),
+      sendStatus: Number(row.send_status) === 0
+        ? 'sending'
+        : Number(row.send_status) === 1
+          ? 'success'
+          : Number(row.send_status) === 3
+            ? 'queued'
+            : 'failed',
+    }
+  }
+
+  private applySenderDirectorySnapshot(database: DatabaseSync, message: ServerMessage) {
+    const senderVersion = Number(message.senderUpdatedTime ?? 0)
+    if (senderVersion > 0 && message.senderName) {
+      database.prepare(`
+        INSERT INTO user (id, username, nickname, avatar_url, status, created_time, updated_time)
+        VALUES (?, ?, ?, ?, 1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          username=COALESCE(excluded.username, user.username),
+          nickname=excluded.nickname,
+          avatar_local_path=CASE WHEN avatar_url IS excluded.avatar_url THEN avatar_local_path ELSE NULL END,
+          avatar_url=excluded.avatar_url,
+          updated_time=excluded.updated_time
+        WHERE excluded.updated_time > user.updated_time
+      `).run(
+        message.senderId,
+        message.senderUsername ?? null,
+        message.senderName,
+        message.senderAvatarUrl ?? null,
+        message.createdTime,
+        senderVersion,
+      )
+    }
+    const memberVersion = Number(message.groupMemberUpdatedTime ?? 0)
+    if (message.chatType === 1 && memberVersion > 0 && message.groupMemberId) {
+      database.prepare(`
+        INSERT INTO group_member (id, group_id, user_id, role, nickname, created_time, updated_time)
+        VALUES (?, ?, ?, 0, ?, ?, ?)
+        ON CONFLICT(group_id, user_id) DO UPDATE SET
+          nickname=excluded.nickname,
+          updated_time=excluded.updated_time
+        WHERE excluded.updated_time > group_member.updated_time
+      `).run(
+        message.groupMemberId,
+        message.targetId,
+        message.senderId,
+        message.groupMemberNickname ?? null,
+        message.createdTime,
+        memberVersion,
+      )
     }
   }
 
@@ -841,6 +1068,14 @@ class DatabaseManager {
     database.prepare(`
       UPDATE inbox_sync_state SET last_sequence = MAX(last_sequence, ?), updated_time = ? WHERE id = 1
     `).run(sequence, Date.now())
+  }
+
+  private setDirectoryVersion(database: DatabaseSync, syncKey: string, version: string) {
+    database.prepare(`
+      INSERT INTO directory_sync_state (sync_key, version, updated_time)
+      VALUES (?, ?, ?)
+      ON CONFLICT(sync_key) DO UPDATE SET version=excluded.version, updated_time=excluded.updated_time
+    `).run(syncKey, version, Date.now())
   }
 
   private directChatKey(firstId: string, secondId: string) {

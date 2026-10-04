@@ -21,6 +21,7 @@ export const useContactsStore = defineStore('contacts', () => {
     else friendRequests.value.unshift(request)
   }
   function setFriends(nextFriends: Friend[]) { friends.value = nextFriends }
+  function setRequests(nextRequests: FriendRequest[]) { friendRequests.value = nextRequests }
   function setGroups(nextGroups: GroupChat[]) { groups.value = nextGroups }
   function removeRequest(id: string) {
     friendRequests.value = friendRequests.value.filter((item) => item.id !== id)
@@ -48,5 +49,5 @@ export const useContactsStore = defineStore('contacts', () => {
     friendRequests.value = []
     groups.value = []
   }
-  return { friends, friendRequests, groups, setData, setFriends, setGroups, addRequest, updateRequest, removeRequest, updateRemark, addFriend, removeFriend, addGroup, updateGroup, removeGroup, reset }
+  return { friends, friendRequests, groups, setData, setFriends, setRequests, setGroups, addRequest, updateRequest, removeRequest, updateRemark, addFriend, removeFriend, addGroup, updateGroup, removeGroup, reset }
 })

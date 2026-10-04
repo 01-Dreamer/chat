@@ -3,6 +3,8 @@ package top.zxylearn.chatserver.service;
 import com.baomidou.mybatisplus.core.incrementer.IdentifierGenerator;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import top.zxylearn.chatserver.entity.Event;
 import top.zxylearn.chatserver.entity.UserInbox;
 import top.zxylearn.chatserver.exception.BusinessException;
@@ -10,6 +12,8 @@ import top.zxylearn.chatserver.mapper.EventMapper;
 import top.zxylearn.chatserver.mapper.UserInboxMapper;
 import top.zxylearn.chatserver.mapper.UserMapper;
 import top.zxylearn.chatserver.mapper.projection.UserInboxSequence;
+import top.zxylearn.chatserver.mq.RealtimeEvent;
+import top.zxylearn.chatserver.mq.RealtimeEventPublisher;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -27,16 +31,19 @@ public class ReliableEventService {
     private final UserInboxMapper inboxMapper;
     private final UserMapper userMapper;
     private final IdentifierGenerator identifierGenerator;
+    private final RealtimeEventPublisher realtimePublisher;
 
     public ReliableEventService(
             EventMapper eventMapper,
             UserInboxMapper inboxMapper,
             UserMapper userMapper,
-            IdentifierGenerator identifierGenerator) {
+            IdentifierGenerator identifierGenerator,
+            RealtimeEventPublisher realtimePublisher) {
         this.eventMapper = eventMapper;
         this.inboxMapper = inboxMapper;
         this.userMapper = userMapper;
         this.identifierGenerator = identifierGenerator;
+        this.realtimePublisher = realtimePublisher;
     }
 
     public EventDelivery append(
@@ -82,6 +89,22 @@ public class ReliableEventService {
             sequences.put(userId, nextSequence);
         }
         inboxMapper.insertBatch(inboxRows);
+        if (eventType >= 2 && eventType <= 6 && !sequences.isEmpty()) {
+            Runnable publish = () -> realtimePublisher.publish(RealtimeEvent.businessEvent(
+                    "DIRECTORY_CHANGED",
+                    sequences,
+                    Map.of("eventType", eventType, "referenceId", Long.toString(referenceId))));
+            if (TransactionSynchronizationManager.isSynchronizationActive()) {
+                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        publish.run();
+                    }
+                });
+            } else {
+                publish.run();
+            }
+        }
         return new EventDelivery(event, sequences);
     }
 

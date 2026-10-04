@@ -1,6 +1,6 @@
-import { app, BrowserWindow, ipcMain, screen, shell, type Rectangle } from 'electron'
+import { app, BrowserWindow, clipboard, ipcMain, screen, shell, type Rectangle } from 'electron'
 import { join } from 'node:path'
-import type { IpcResult, PendingAttachment } from './types'
+import type { IpcResult, MessagePageCursor, PendingAttachment } from './types'
 import { databaseManager } from './database/databaseManager'
 import { authService } from './services/authService'
 import { friendService } from './services/friendService'
@@ -36,7 +36,7 @@ function registerIpc() {
     initializeUserDatabase(user)
     avatarCacheService.cacheCurrentUser(user)
     realtimeService.connect(user.id)
-    return user
+    return databaseManager.loadCachedUser(user.id, user.balance) ?? user
   }))
   ipcMain.handle('auth:register', (_event, nickname: string, username: string, password: string) => asIpcResult(async () => {
     return authService.register(nickname, username, password)
@@ -55,14 +55,14 @@ function registerIpc() {
     initializeUserDatabase(user)
     avatarCacheService.cacheCurrentUser(user)
     const [friendData, groupData, notifications] = await Promise.all([
-      friendService.loadAndSync().catch(() => ({ friends: databaseManager.loadCachedFriends(), requests: databaseManager.loadCachedFriendRequests() })),
-      groupService.loadAndSync(user.id).catch(() => ({ groups: databaseManager.loadCachedGroups(), requests: [] })),
-      notificationService.list().catch(() => databaseManager.loadCachedNotifications()),
+      friendService.loadAndSync(),
+      groupService.loadAndSync(user.id),
+      notificationService.list(),
     ])
     realtimeService.connect(user.id)
     const chatData = databaseManager.loadSessionState()
     return {
-      user: { ...user, avatar: databaseManager.getDisplayAvatar('user', user.id) ?? user.avatar },
+      user: databaseManager.loadCachedUser(user.id, user.balance) ?? user,
       friends: friendData.friends,
       friendRequests: [...friendData.requests, ...groupData.requests],
       groups: groupData.groups,
@@ -72,7 +72,7 @@ function registerIpc() {
     }
   })
   ipcMain.handle('sessions:localState', () => databaseManager.loadSessionState())
-  ipcMain.handle('sessions:messages', (_event, chatKey: string) => databaseManager.loadConversationMessages(chatKey))
+  ipcMain.handle('sessions:messages', (_event, chatKey: string, cursor: MessagePageCursor | null, pageSize?: number) => databaseManager.loadConversationMessages(chatKey, cursor, pageSize))
   ipcMain.handle('sessions:setPinned', (_event, chatKey: string, pinned: boolean) => {
     databaseManager.setSessionPinned(chatKey, pinned)
     return databaseManager.loadConversations()
@@ -121,9 +121,8 @@ function registerIpc() {
     const resource = await fileService.selectAndUpload(0)
     return resource ? profileService.updateAvatar(resource.id) : null
   })
-  ipcMain.handle('profile:resetTransferPassword', (_event, oldPassword: string, newPassword: string) => walletService.setPayPassword(oldPassword, newPassword))
+  ipcMain.handle('profile:resetPayPassword', (_event, oldPassword: string, newPassword: string) => walletService.setPayPassword(oldPassword, newPassword))
   ipcMain.handle('wallet:account', () => walletService.account())
-  ipcMain.handle('wallet:transfer', (_event, recipientUserId: string, amount: string, payPassword: string) => walletService.transfer(recipientUserId, amount, payPassword))
   ipcMain.handle('wallet:sendRedPacket', async (_event, conversationId: string, input) => {
     const packet = await walletService.createRedPacket(input)
     databaseManager.upsertRedPacket(packet)
@@ -139,6 +138,7 @@ function registerIpc() {
   ipcMain.handle('asr:transcribe', (_event, resourceId: string) => aiService.transcribe(resourceId))
   ipcMain.handle('calls:create', (_event, calleeId: string, callType: number) => callService.create(calleeId, callType))
   ipcMain.handle('calls:update', (_event, callId: string, action) => callService.update(callId, action))
+  ipcMain.handle('calls:get', (_event, callId: string) => callService.get(callId))
   ipcMain.handle('calls:iceServers', () => callService.iceServers())
   ipcMain.handle('calls:signal', (_event, callId: string, targetUserId: string, signalType, payload) => callService.signal(callId, targetUserId, signalType, payload))
   ipcMain.handle('contacts:acceptRequest', (_event, id: string, type: 'friend' | 'group') => type === 'group'
@@ -151,6 +151,14 @@ function registerIpc() {
   ipcMain.handle('contacts:searchFriend', (_event, username: string) => friendService.search(username))
   ipcMain.handle('contacts:applyFriend', (_event, username: string, reason: string) => friendService.apply(username, reason))
   ipcMain.handle('contacts:listFriends', () => friendService.listFriends())
+  ipcMain.handle('contacts:listRequests', async () => {
+    const currentUserId = authService.getCurrentUserId()
+    const [friendRequests, groupRequests] = await Promise.all([
+      friendService.listRequests(),
+      groupService.listRequests(currentUserId),
+    ])
+    return [...friendRequests, ...groupRequests]
+  })
   ipcMain.handle('contacts:deleteFriend', (_event, id: string) => friendService.delete(id))
   ipcMain.handle('contacts:searchGroup', (_event, groupNumber: string) => groupService.search(groupNumber))
   ipcMain.handle('contacts:applyGroup', (_event, groupNumber: string, reason: string) => groupService.apply(groupNumber, reason, authService.getCurrentUserId()))
@@ -177,9 +185,15 @@ function registerIpc() {
       friends: friendData.friends,
       friendRequests: [...friendData.requests, ...groupData.requests],
       groups: groupData.groups,
+      conversations: databaseManager.loadConversations(),
     }
   })
   ipcMain.handle('notifications:markRead', (_event, id: string) => notificationService.markRead(id))
+  ipcMain.handle('notifications:list', () => notificationService.list())
+  ipcMain.handle('clipboard:writeText', (_event, value: string) => {
+    clipboard.writeText(String(value ?? ''))
+    return true
+  })
   ipcMain.on('window:setMode', (event, mode: keyof typeof windowSizes) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     const size = windowSizes[mode] ?? windowSizes.main

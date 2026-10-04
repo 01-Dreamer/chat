@@ -12,12 +12,10 @@ import org.springframework.web.bind.annotation.RestController;
 import top.zxylearn.chatserver.common.ApiResponse;
 import top.zxylearn.chatserver.dto.wallet.CreateRedPacketRequest;
 import top.zxylearn.chatserver.dto.wallet.SetPayPasswordRequest;
-import top.zxylearn.chatserver.dto.wallet.TransferRequest;
 import top.zxylearn.chatserver.service.WalletService;
 import top.zxylearn.chatserver.vo.AccountResponse;
 import top.zxylearn.chatserver.vo.RedPacketClaimResponse;
 import top.zxylearn.chatserver.vo.RedPacketResponse;
-import top.zxylearn.chatserver.vo.TransactionResponse;
 
 @RestController
 @RequestMapping("/api")
@@ -38,11 +36,6 @@ public class WalletController {
     public ApiResponse<AccountResponse> setPayPassword(@Valid @RequestBody SetPayPasswordRequest request) {
         return ApiResponse.success(walletService.setPayPassword(
                 StpUtil.getLoginIdAsLong(), request.oldPassword(), request.newPassword()));
-    }
-
-    @PostMapping("/wallet/transfers")
-    public ApiResponse<TransactionResponse> transfer(@Valid @RequestBody TransferRequest request) {
-        return ApiResponse.success(walletService.transfer(StpUtil.getLoginIdAsLong(), request));
     }
 
     @PostMapping("/red-packets")

@@ -10,6 +10,8 @@ import top.zxylearn.chatserver.exception.BusinessException;
 import top.zxylearn.chatserver.service.MessagePersistenceService;
 
 import java.io.IOException;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @Component
 public class MessageCommandConsumer {
@@ -30,7 +32,7 @@ public class MessageCommandConsumer {
         this.failedQueue = messageQueue + ".failed";
     }
 
-    @RabbitListener(queues = "${chat.mq.message-queue}")
+    @RabbitListener(queues = "${chat.mq.message-queue}", concurrency = "4-12")
     public void consume(
             SendMessageCommand command,
             org.springframework.amqp.core.Message amqpMessage,
@@ -46,16 +48,34 @@ public class MessageCommandConsumer {
         } catch (BusinessException exception) {
             realtimePublisher.publish(RealtimeEvent.sendFailed(
                     command.senderId(), command.clientMessageId(), exception.getCode(), exception.getMessage()));
+            rejectFastPreview(command);
             channel.basicAck(deliveryTag, false);
         } catch (Exception exception) {
             if (Boolean.TRUE.equals(amqpMessage.getMessageProperties().getRedelivered())) {
                 rabbitTemplate.convertAndSend(failedQueue, command);
                 realtimePublisher.publish(RealtimeEvent.sendFailed(
                         command.senderId(), command.clientMessageId(), "MESSAGE_PROCESSING_FAILED", "消息处理失败，请稍后重试"));
+                rejectFastPreview(command);
                 channel.basicAck(deliveryTag, false);
             } else {
                 channel.basicNack(deliveryTag, false, true);
             }
         }
+    }
+
+    private void rejectFastPreview(SendMessageCommand command) {
+        if (command.previewRecipientIds() == null || command.previewChatKey() == null) return;
+        Map<Long, Long> targets = new LinkedHashMap<>();
+        for (Long recipientId : command.previewRecipientIds()) {
+            if (recipientId != null && recipientId != command.senderId()) targets.put(recipientId, 0L);
+        }
+        if (targets.isEmpty()) return;
+        realtimePublisher.publish(RealtimeEvent.businessEvent(
+                "MESSAGE_REJECTED",
+                targets,
+                Map.of(
+                        "senderId", Long.toString(command.senderId()),
+                        "clientMessageId", command.clientMessageId(),
+                        "chatKey", command.previewChatKey())));
     }
 }

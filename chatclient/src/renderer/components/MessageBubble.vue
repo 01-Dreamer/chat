@@ -3,11 +3,13 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Document, Loading, Money, WarningFilled, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useAppStore } from '../stores/app'
+import { useChatStore } from '../stores/chat'
 import type { Message } from '../types'
 import AvatarDisplay from './AvatarDisplay.vue'
 
 const props = defineProps<{ message: Message; own: boolean; canRecall: boolean; replyMessage?: Message; replySenderName?: string }>()
 const appStore = useAppStore()
+const chatStore = useChatStore()
 const emit = defineEmits<{
   recall: [message: Message]
   quote: [message: Message]
@@ -28,6 +30,8 @@ const imageLoading = ref(false)
 const imageLoadFailed = ref(false)
 const downloadingDocument = ref(false)
 const documentDownloadProgress = ref(0)
+const claimingPacket = ref(false)
+const packetClaimed = ref(false)
 const contextMenuVisible = ref(false)
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
@@ -141,6 +145,32 @@ async function translate() {
   finally { translating.value = false }
 }
 
+async function claimRedPacket() {
+  if (!props.message.referenceId || claimingPacket.value) return
+  if (props.own && chatStore.currentConversation?.type === 'direct') {
+    ElMessage.info('自己发送的单聊红包不能领取')
+    return
+  }
+  claimingPacket.value = true
+  try {
+    const result = await window.chatApi.claimRedPacket(props.message.referenceId)
+    if (result.expired) {
+      ElMessage.warning('红包已经过期')
+      return
+    }
+    packetClaimed.value = true
+    ElMessage.success(result.alreadyReceived ? `你已经领取过 ¥${result.amount}` : `领取成功 ¥${result.amount}`)
+    try {
+      const wallet = await window.chatApi.getWallet()
+      if (appStore.currentUser) appStore.currentUser.balance = wallet.balance
+    } catch { /* The received amount is already committed; balance can refresh later. */ }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '红包领取失败')
+  } finally {
+    claimingPacket.value = false
+  }
+}
+
 function openContextMenu(event: MouseEvent) {
   if (props.message.status === 1 || props.message.id.startsWith('local:')) return
   contextMenuX.value = Math.min(event.clientX, window.innerWidth - 126)
@@ -248,7 +278,7 @@ watch(
         </button>
       </template>
 
-      <button v-else-if="message.type === 'red_packet'" class="money-msg" @click="message.referenceId && window.chatApi.claimRedPacket(message.referenceId).then((result) => ElMessage.success(result.alreadyReceived ? `已领取 ¥${result.amount}` : `领取成功 ¥${result.amount}`)).catch((error) => ElMessage.error(error instanceof Error ? error.message : '领取失败'))"><el-icon :size="32"><Money /></el-icon><div class="money-details"><strong>¥ {{ message.amount || '--' }}</strong><span>{{ message.content || '红包' }}</span></div></button>
+      <button v-else-if="message.type === 'red_packet'" class="money-msg" :class="{ claimed: packetClaimed }" :disabled="claimingPacket" @click="claimRedPacket"><el-icon :size="32"><Money /></el-icon><div class="money-details"><strong>¥ {{ message.amount || '--' }}</strong><span>{{ claimingPacket ? '正在领取…' : packetClaimed ? '红包已领取' : message.content || '红包' }}</span></div></button>
 
       <template v-else-if="message.type === 'voice'">
         <div class="voice-line">

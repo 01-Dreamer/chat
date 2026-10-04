@@ -1,9 +1,4 @@
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-
-const envFile = fileURLToPath(new URL('../.env', import.meta.url))
-if (existsSync(envFile)) process.loadEnvFile(envFile)
 
 const command = process.platform === 'win32' ? 'npx.cmd' : 'npx'
 const child = spawn(command, ['electron-vite', 'dev', '--noSandbox'], {
