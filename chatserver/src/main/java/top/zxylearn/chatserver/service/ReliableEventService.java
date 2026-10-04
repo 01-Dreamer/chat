@@ -1,5 +1,6 @@
 package top.zxylearn.chatserver.service;
 
+import com.baomidou.mybatisplus.core.incrementer.IdentifierGenerator;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import top.zxylearn.chatserver.entity.Event;
@@ -8,6 +9,7 @@ import top.zxylearn.chatserver.exception.BusinessException;
 import top.zxylearn.chatserver.mapper.EventMapper;
 import top.zxylearn.chatserver.mapper.UserInboxMapper;
 import top.zxylearn.chatserver.mapper.UserMapper;
+import top.zxylearn.chatserver.mapper.projection.UserInboxSequence;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -24,17 +26,29 @@ public class ReliableEventService {
     private final EventMapper eventMapper;
     private final UserInboxMapper inboxMapper;
     private final UserMapper userMapper;
+    private final IdentifierGenerator identifierGenerator;
 
     public ReliableEventService(
             EventMapper eventMapper,
             UserInboxMapper inboxMapper,
-            UserMapper userMapper) {
+            UserMapper userMapper,
+            IdentifierGenerator identifierGenerator) {
         this.eventMapper = eventMapper;
         this.inboxMapper = inboxMapper;
         this.userMapper = userMapper;
+        this.identifierGenerator = identifierGenerator;
     }
 
     public EventDelivery append(
+            int eventType,
+            long referenceId,
+            Collection<Long> recipientIds,
+            LocalDateTime now) {
+        lockUsers(recipientIds);
+        return appendForLockedUsers(eventType, referenceId, recipientIds, now);
+    }
+
+    public EventDelivery appendForLockedUsers(
             int eventType,
             long referenceId,
             Collection<Long> recipientIds,
@@ -46,29 +60,35 @@ public class ReliableEventService {
         event.setUpdatedTime(now);
         eventMapper.insert(event);
 
-        Map<Long, Long> sequences = new LinkedHashMap<>();
-        for (Long userId : orderedUnique(recipientIds)) {
-            if (userMapper.lockById(userId) == null) {
-                throw new BusinessException("USER_NOT_FOUND", "事件接收用户不存在", HttpStatus.CONFLICT);
+        List<Long> recipients = orderedUnique(recipientIds);
+        Map<Long, Long> currentSequences = new LinkedHashMap<>();
+        for (UserInboxSequence row : inboxMapper.selectMaxSequences(recipients)) {
+            if (row.getUserId() != null && row.getSequence() != null) {
+                currentSequences.put(row.getUserId(), row.getSequence());
             }
-            long nextSequence = inboxMapper.selectMaxSequence(userId) + 1;
+        }
+        Map<Long, Long> sequences = new LinkedHashMap<>();
+        List<UserInbox> inboxRows = new ArrayList<>(recipients.size());
+        for (Long userId : recipients) {
+            long nextSequence = currentSequences.getOrDefault(userId, 0L) + 1;
             UserInbox inbox = new UserInbox();
+            inbox.setId(identifierGenerator.nextId(inbox).longValue());
             inbox.setUserId(userId);
             inbox.setEventId(event.getId());
             inbox.setSequence(nextSequence);
             inbox.setCreatedTime(now);
             inbox.setUpdatedTime(now);
-            inboxMapper.insert(inbox);
+            inboxRows.add(inbox);
             sequences.put(userId, nextSequence);
         }
+        inboxMapper.insertBatch(inboxRows);
         return new EventDelivery(event, sequences);
     }
 
     public void lockUsers(Collection<Long> userIds) {
-        for (Long userId : orderedUnique(userIds)) {
-            if (userMapper.lockById(userId) == null) {
-                throw new BusinessException("USER_NOT_FOUND", "用户不存在", HttpStatus.CONFLICT);
-            }
+        List<Long> userIdsToLock = orderedUnique(userIds);
+        if (userIdsToLock.isEmpty() || userMapper.lockByIds(userIdsToLock).size() != userIdsToLock.size()) {
+            throw new BusinessException("USER_NOT_FOUND", "用户不存在", HttpStatus.CONFLICT);
         }
     }
 

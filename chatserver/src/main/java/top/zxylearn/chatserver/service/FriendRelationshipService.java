@@ -40,6 +40,7 @@ public class FriendRelationshipService {
     private final FriendAddRequestMapper requestMapper;
     private final FriendDeleteRecordMapper deleteRecordMapper;
     private final ReliableEventService reliableEventService;
+    private final ChatAccessCache chatAccessCache;
 
     public FriendRelationshipService(
             UserService userService,
@@ -47,13 +48,15 @@ public class FriendRelationshipService {
             FriendMapper friendMapper,
             FriendAddRequestMapper requestMapper,
             FriendDeleteRecordMapper deleteRecordMapper,
-            ReliableEventService reliableEventService) {
+            ReliableEventService reliableEventService,
+            ChatAccessCache chatAccessCache) {
         this.userService = userService;
         this.userMapper = userMapper;
         this.friendMapper = friendMapper;
         this.requestMapper = requestMapper;
         this.deleteRecordMapper = deleteRecordMapper;
         this.reliableEventService = reliableEventService;
+        this.chatAccessCache = chatAccessCache;
     }
 
     public List<FriendResponse> listFriends() {
@@ -177,6 +180,7 @@ public class FriendRelationshipService {
         record.setCreatedTime(now);
         record.setUpdatedTime(now);
         deleteRecordMapper.insert(record);
+        chatAccessCache.evictDirect(currentUserId, friendUserId);
     }
 
     private FriendRequestResponse handleRequest(long requestId, int resultStatus) {
@@ -198,6 +202,7 @@ public class FriendRelationshipService {
         if (resultStatus == REQUEST_ACCEPTED) {
             createFriendRelationIfMissing(request.getSenderId(), request.getReceiverId(), now);
             createFriendRelationIfMissing(request.getReceiverId(), request.getSenderId(), now);
+            chatAccessCache.evictDirect(request.getSenderId(), request.getReceiverId());
         }
         reliableEventService.append(
                 EVENT_FRIEND_REQUEST_HANDLED,

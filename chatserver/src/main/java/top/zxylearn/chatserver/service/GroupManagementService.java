@@ -63,6 +63,7 @@ public class GroupManagementService {
     private final ReliableEventService reliableEventService;
     private final FileResourceMapper fileResourceMapper;
     private final FileResourceAccessMapper fileResourceAccessMapper;
+    private final ChatAccessCache chatAccessCache;
 
     public GroupManagementService(
             GroupMapper groupMapper,
@@ -74,7 +75,8 @@ public class GroupManagementService {
             FriendMapper friendMapper,
             FileResourceMapper fileResourceMapper,
             FileResourceAccessMapper fileResourceAccessMapper,
-            ReliableEventService reliableEventService) {
+            ReliableEventService reliableEventService,
+            ChatAccessCache chatAccessCache) {
         this.groupMapper = groupMapper;
         this.memberMapper = memberMapper;
         this.requestMapper = requestMapper;
@@ -85,6 +87,7 @@ public class GroupManagementService {
         this.fileResourceMapper = fileResourceMapper;
         this.fileResourceAccessMapper = fileResourceAccessMapper;
         this.reliableEventService = reliableEventService;
+        this.chatAccessCache = chatAccessCache;
     }
 
     @Transactional
@@ -108,6 +111,7 @@ public class GroupManagementService {
         for (Long memberId : initialMemberIds) {
             insertMember(group.getId(), memberId, ROLE_MEMBER, now);
         }
+        chatAccessCache.evictGroup(group.getId());
         return response(group, owner, null);
     }
 
@@ -314,6 +318,7 @@ public class GroupManagementService {
         requestMapper.updateById(request);
         if (accept && findMember(request.getGroupId(), request.getUserId()) == null) {
             insertMember(request.getGroupId(), request.getUserId(), ROLE_MEMBER, now);
+            chatAccessCache.evictGroup(request.getGroupId());
         }
         reliableEventService.append(
                 EVENT_GROUP_JOIN_REQUEST_HANDLED,
@@ -333,6 +338,7 @@ public class GroupManagementService {
             throw new BusinessException("GROUP_OWNER_CANNOT_LEAVE", "群主需要先解散群聊", HttpStatus.CONFLICT);
         }
         removeMember(member, currentUserId, currentUserId, LocalDateTime.now());
+        chatAccessCache.evictGroup(groupId);
     }
 
     @Transactional
@@ -350,6 +356,7 @@ public class GroupManagementService {
             throw new BusinessException("GROUP_PERMISSION_DENIED", "管理员不能移除群主或其他管理员", HttpStatus.FORBIDDEN);
         }
         removeMember(target, memberUserId, currentUserId, LocalDateTime.now());
+        chatAccessCache.evictGroup(groupId);
     }
 
     @Transactional
@@ -371,6 +378,7 @@ public class GroupManagementService {
         }
         memberMapper.delete(new LambdaQueryWrapper<GroupMember>().eq(GroupMember::getGroupId, groupId));
         settingMapper.delete(new LambdaQueryWrapper<UserGroupSetting>().eq(UserGroupSetting::getGroupId, groupId));
+        chatAccessCache.evictGroup(groupId);
     }
 
     private List<GroupJoinRequestResponse> mapJoinRequests(List<GroupJoinRequest> requests) {

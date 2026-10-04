@@ -27,7 +27,8 @@ class MessageService {
   }
 
   private send(conversationId: string, messageType: number, content: string, resource?: FileResource, packet?: RedPacket, replyMessageId?: string | null): Message {
-    const currentUserId = authService.getCurrentUserId()
+    const currentUser = authService.getCurrentUser()
+    const currentUserId = currentUser.id
     const chat = this.parseChatKey(conversationId, currentUserId)
     const clientMessageId = randomUUID()
     const createdAt = Date.now()
@@ -37,8 +38,8 @@ class MessageService {
       chatKey: conversationId,
       conversationId,
       senderId: currentUserId,
-      senderName: '我',
-      senderAvatar: null,
+      senderName: currentUser.nickname,
+      senderAvatar: databaseManager.getDisplayAvatar('user', currentUserId) ?? currentUser.avatar,
       type: resource?.resourceType === 2 ? 'voice' : messageType === 1 ? 'file' : 'text',
       content,
       referenceId: resource?.id ?? packet?.id ?? null,
@@ -90,13 +91,28 @@ class MessageService {
     } catch {
       // Existing SQLite history remains available offline or after membership loss.
     }
-    return { conversation, messages: databaseManager.loadConversationMessages(conversation.id) }
+    databaseManager.markSessionRead(conversation.id)
+    return {
+      conversation: databaseManager.getConversation(conversation.id) ?? conversation,
+      messages: databaseManager.loadConversationMessages(conversation.id),
+    }
   }
 
   async recall(messageId: string) {
     if (!/^\d+$/.test(messageId)) throw new Error('消息尚未发送成功，无法撤回')
     const message = await apiClient.post<ServerMessage>(`/messages/${messageId}/recall`)
     return databaseManager.applyRealtimeMessage(message)
+  }
+
+  retry(clientMessageId: string) {
+    const retry = databaseManager.prepareMessageRetry(clientMessageId)
+    try {
+      realtimeService.sendMessage(retry.payload)
+    } catch {
+      databaseManager.markMessageFailed(clientMessageId)
+      retry.message.sendStatus = 'failed'
+    }
+    return retry.message
   }
 
   private async prepareReference(message: ServerMessage) {

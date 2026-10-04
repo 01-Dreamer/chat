@@ -15,6 +15,12 @@ public class RealtimeEventConsumer {
 
     @RabbitListener(queues = "#{realtimeQueue.name}")
     public void receive(RealtimeEvent event) {
+        if ("FORCED_LOGOUT".equals(event.type()) && event.data() instanceof java.util.Map<?, ?> data) {
+            String currentToken = String.valueOf(data.get("currentToken"));
+            String message = String.valueOf(data.get("message"));
+            event.targetSequences().keySet().forEach(userId -> registry.forceLogout(userId, currentToken, message));
+            return;
+        }
         event.targetSequences().forEach((userId, sequence) -> registry.send(
                 userId,
                 new UserRealtimeEvent(

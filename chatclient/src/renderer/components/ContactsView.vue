@@ -187,6 +187,7 @@ async function exitGroup() {
     </aside>
 
     <section class="profile-panel">
+      <div class="profile-drag-surface" aria-hidden="true" />
       <template v-if="selected">
         <div class="profile-content">
           <AvatarDisplay :src="selected.avatar" :name="isGroup(selected) ? selected.name : isFriend(selected) ? selected.nickname : requestTitle(selected)" :size="70" :radius="8" class="profile-avatar" />

@@ -17,4 +17,14 @@ public record RealtimeEvent(
     public static RealtimeEvent sendFailed(long senderId, String clientMessageId, String code, String message) {
         return new RealtimeEvent("SEND_FAILED", Map.of(senderId, 0L), null, code, message, clientMessageId);
     }
+
+    public static RealtimeEvent forcedLogout(long userId, String currentToken) {
+        return new RealtimeEvent(
+                "FORCED_LOGOUT",
+                Map.of(userId, 0L),
+                Map.of("currentToken", currentToken, "message", "你的账号已在另一台设备登录"),
+                null,
+                null,
+                null);
+    }
 }

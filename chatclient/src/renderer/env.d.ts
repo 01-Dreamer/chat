@@ -1,4 +1,4 @@
-import type { BootstrapData, CallRecord, Friend, FriendRequest, GroupActionResult, GroupChat, GroupMember, Message, OpenConversationResult, ProfilePatch, TransferResult, User, WalletAccount } from '../main/types'
+import type { BootstrapData, CallRecord, Conversation, Friend, FriendRequest, GroupActionResult, GroupChat, GroupMember, Message, OpenConversationResult, PendingAttachment, ProfilePatch, TransferResult, User, WalletAccount } from '../main/types'
 
 declare global {
   interface Window {
@@ -8,15 +8,25 @@ declare global {
       logout(): Promise<boolean>
       bootstrap(): Promise<BootstrapData>
       loadLocalChatState(): Promise<{ conversations: Conversation[], messages: Record<string, Message[]> }>
+      loadConversationMessages(chatKey: string): Promise<Message[]>
       setSessionPinned(chatKey: string, pinned: boolean): Promise<Conversation[]>
       markSessionRead(chatKey: string): Promise<void>
+      setActiveSession(chatKey: string | null): Promise<void>
       hideSession(chatKey: string): Promise<void>
       sendMessage(message: Omit<Message, 'id' | 'createdAt'>): Promise<Message>
-      selectAndSendFile(conversationId: string, resourceType?: number): Promise<Message | null>
-      captureAndSend(conversationId: string): Promise<Message>
+      selectAttachments(): Promise<PendingAttachment[]>
+      stageDroppedFiles(files: File[]): Promise<PendingAttachment[]>
+      captureScreen(): Promise<PendingAttachment | null>
+      sendAttachment(conversationId: string, attachment: PendingAttachment): Promise<Message>
+      sendVoice(conversationId: string, bytes: Uint8Array, mimeType: string, duration: number): Promise<Message>
       openFile(resourceId: string): Promise<string>
+      loadVoice(resourceId: string): Promise<{ bytes: Uint8Array, mimeType: string }>
+      loadImage(resourceId: string): Promise<{ bytes: Uint8Array, mimeType: string }>
+      downloadFile(resourceId: string): Promise<boolean>
+      onFileDownloadProgress(callback: (value: { resourceId: string, received: number, total: number, percent: number }) => void): () => void
       openConversation(type: 'direct' | 'group', targetId: string): Promise<OpenConversationResult>
       recallMessage(messageId: string): Promise<Message>
+      retryMessage(clientMessageId: string): Promise<Message>
       updateProfile(patch: ProfilePatch): Promise<User>
       updateAvatar(): Promise<User | null>
       resetTransferPassword(oldPassword: string, newPassword: string): Promise<WalletAccount>

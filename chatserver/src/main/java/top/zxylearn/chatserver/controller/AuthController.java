@@ -25,7 +25,7 @@ public class AuthController {
     }
 
     @PostMapping("/register")
-    public ApiResponse<AuthSessionResponse> register(@Valid @RequestBody RegisterRequest request) {
+    public ApiResponse<UserProfileResponse> register(@Valid @RequestBody RegisterRequest request) {
         return ApiResponse.success(authService.register(request));
     }
 

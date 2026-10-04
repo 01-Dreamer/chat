@@ -23,6 +23,8 @@ import top.zxylearn.chatserver.vo.InboxSyncResponse;
 import top.zxylearn.chatserver.vo.MessageResponse;
 
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -66,9 +68,21 @@ public class InboxSyncService {
                 .last("LIMIT " + (limit + 1)));
         boolean hasMore = rows.size() > limit;
         if (hasMore) rows = new ArrayList<>(rows.subList(0, limit));
+        List<Long> eventIds = rows.stream().map(UserInbox::getEventId).distinct().toList();
+        Map<Long, Event> events = eventIds.isEmpty()
+                ? Map.of()
+                : mapById(eventMapper.selectBatchIds(eventIds));
+        List<Long> messageIds = events.values().stream()
+                .filter(event -> event.getEventType() == 0 || event.getEventType() == 1)
+                .map(Event::getReferenceId)
+                .distinct()
+                .toList();
+        Map<Long, Message> messages = messageIds.isEmpty()
+                ? Map.of()
+                : mapById(messageMapper.selectBatchIds(messageIds));
         List<InboxEventResponse> items = new ArrayList<>(rows.size());
         for (UserInbox inbox : rows) {
-            Event event = eventMapper.selectById(inbox.getEventId());
+            Event event = events.get(inbox.getEventId());
             if (event == null) {
                 items.add(new InboxEventResponse(
                         inbox.getId().toString(), inbox.getSequence(), inbox.getEventId().toString(),
@@ -81,16 +95,16 @@ public class InboxSyncService {
                     event.getId().toString(),
                     event.getEventType(),
                     event.getReferenceId().toString(),
-                    resolvePayload(userId, event),
+                    resolvePayload(userId, event, messages),
                     toEpochMilli(event.getCreatedTime())));
         }
         long lastSequence = items.isEmpty() ? Math.max(0, afterSequence) : items.get(items.size() - 1).sequence();
         return new InboxSyncResponse(items, lastSequence, hasMore);
     }
 
-    private Object resolvePayload(long userId, Event event) {
+    private Object resolvePayload(long userId, Event event, Map<Long, Message> messages) {
         if (event.getEventType() == 0 || event.getEventType() == 1) {
-            Message message = messageMapper.selectById(event.getReferenceId());
+            Message message = messages.get(event.getReferenceId());
             if (message != null) return MessageResponse.from(message);
         } else if (event.getEventType() == 2 || event.getEventType() == 3) {
             FriendAddRequest request = friendRequestMapper.selectById(event.getReferenceId());
@@ -111,5 +125,11 @@ public class InboxSyncService {
         fallback.put("referenceId", event.getReferenceId().toString());
         fallback.put("available", false);
         return fallback;
+    }
+
+    private <T extends top.zxylearn.chatserver.entity.BaseEntity> Map<Long, T> mapById(Collection<T> values) {
+        Map<Long, T> result = new HashMap<>();
+        for (T value : values) result.put(value.getId(), value);
+        return result;
     }
 }

@@ -31,6 +31,7 @@ public class AuthenticatedHandshakeInterceptor implements HandshakeInterceptor {
             long userId = Long.parseLong(String.valueOf(loginId));
             attributes.put("userId", userId);
             attributes.put("deviceId", normalizeDeviceId(query.getFirst("deviceId")));
+            attributes.put("token", token);
             return true;
         } catch (NumberFormatException exception) {
             return false;

@@ -149,6 +149,8 @@ class GroupService {
       time: '刚刚',
       unread: 0,
       targetId: group.id,
+      lastActiveTime: Date.now(),
+      createdTime: Date.now(),
     }
     databaseManager.saveCreatedGroup(group, conversation)
     return { group, conversation }

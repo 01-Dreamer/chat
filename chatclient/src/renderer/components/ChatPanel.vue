@@ -6,7 +6,7 @@ import { useAppStore } from '../stores/app'
 import { useChatStore } from '../stores/chat'
 import { useCallStore } from '../stores/call'
 import { useContactsStore } from '../stores/contacts'
-import type { Message } from '../types'
+import type { Message, PendingAttachment } from '../types'
 import { formatMessageTime, shouldShowMessageTime } from '../utils/messageTime'
 import MessageBubble from './MessageBubble.vue'
 
@@ -19,7 +19,12 @@ const chatWindowRef = ref<HTMLElement | null>(null)
 const messageListRef = ref<HTMLElement | null>(null)
 const hasScrollableContent = ref(false)
 const isScrollThumbDragging = ref(false)
-const fileUploading = ref(false)
+const composerBusy = ref(false)
+const pendingAttachments = ref<PendingAttachment[]>([])
+const draggingFiles = ref(false)
+const recording = ref(false)
+const recordingSeconds = ref(0)
+const recordingBusy = ref(false)
 const walletVisible = ref(false)
 const walletBusy = ref(false)
 const walletMode = ref<'red_packet' | 'transfer'>('red_packet')
@@ -34,6 +39,14 @@ const scrollThumbTop = ref(0)
 let resizeObserver: ResizeObserver | undefined
 let dragStartY = 0
 let dragStartScrollTop = 0
+let shouldStickToBottom = true
+let mediaRecorder: MediaRecorder | null = null
+let recordingStream: MediaStream | null = null
+let recordingTimer: number | undefined
+let recordingChunks: Blob[] = []
+let discardRecording = false
+let recordingConversationId = ''
+let jumpHighlightTimer: number | undefined
 
 const currentGroupRole = computed(() => {
   const conversation = chatStore.currentConversation
@@ -52,13 +65,34 @@ function isOwnMessage(message: Message) {
 }
 
 function canRecallMessage(message: Message) {
-  if (message.status === 1 || message.id.startsWith('local:')) return false
+  if (message.type === 'red_packet' || message.status === 1 || message.id.startsWith('local:')) return false
   if (isOwnMessage(message)) return true
   return chatStore.currentConversation?.type === 'group' && currentGroupRole.value >= 1
 }
 
 function findReplyMessage(message: Message) {
   return message.replyMessageId ? chatStore.currentMessages.find((item) => item.id === message.replyMessageId) : undefined
+}
+
+function messageSenderDisplayName(message?: Message | null) {
+  if (!message) return '用户'
+  if (message.senderId === appStore.currentUser?.id || message.senderId === 'me') {
+    return appStore.currentUser?.nickname || message.senderName || '我'
+  }
+  const friend = contactsStore.friends.find((item) => item.id === message.senderId)
+  return friend?.remark?.trim() || friend?.nickname || message.senderName || '用户'
+}
+
+function quotePreview(message: Message) {
+  if (message.status === 1) return '[消息已撤回]'
+  if (message.type === 'red_packet') return '[红包]'
+  if (message.type === 'voice') return '[语音]'
+  if (message.type === 'file') {
+    if (message.fileKind === 'image') return '[图片]'
+    if (message.fileKind === 'video') return '[视频]'
+    return '[文件]'
+  }
+  return message.content || '[消息]'
 }
 
 function historyPreview(message: Message) {
@@ -88,6 +122,44 @@ function updateScrollThumb() {
   scrollThumbTop.value = 4 + (element.scrollTop / maxScrollTop) * movableDistance
 }
 
+function isAtBottom(element: HTMLElement) {
+  return element.scrollHeight - element.clientHeight - element.scrollTop <= 8
+}
+
+function scrollToBottom(behavior: ScrollBehavior = 'auto') {
+  const element = chatWindowRef.value
+  if (!element) return
+  shouldStickToBottom = true
+  const bottom = Math.max(0, element.scrollHeight - element.clientHeight)
+  if (behavior === 'auto') element.scrollTop = bottom
+  else element.scrollTo({ top: bottom, behavior })
+  updateScrollThumb()
+}
+
+async function settleScrollToBottom(conversationId: string | null) {
+  await nextTick()
+  // Message bubbles and their resource metadata may render over several layout
+  // frames. Recalculate the actual maximum instead of relying on the first frame.
+  for (let frame = 0; frame < 3; frame++) {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    if (conversationId !== chatStore.currentConversationId) return
+    scrollToBottom()
+  }
+}
+
+function handleMessageContentResized() {
+  requestAnimationFrame(() => {
+    if (shouldStickToBottom) scrollToBottom()
+    else updateScrollThumb()
+  })
+}
+
+function handleChatScroll() {
+  const element = chatWindowRef.value
+  if (element) shouldStickToBottom = isAtBottom(element)
+  updateScrollThumb()
+}
+
 function stopScrollThumbDrag() {
   isScrollThumbDragging.value = false
   window.removeEventListener('pointermove', handleScrollThumbDrag)
@@ -114,41 +186,154 @@ function startScrollThumbDrag(event: PointerEvent) {
   window.addEventListener('pointerup', stopScrollThumbDrag, { once: true })
 }
 
-async function sendText() {
-  const content = draft.value.trim()
-  if (!content || !chatStore.currentConversation) return
-  const message = await window.chatApi.sendMessage({ conversationId: chatStore.currentConversation.id, senderId: appStore.currentUser?.id ?? 'me', senderName: appStore.currentUser?.nickname ?? '我', senderAvatar: appStore.currentUser?.avatar ?? '', type: 'text', content, replyMessageId: quoteTarget.value?.id ?? null })
-  chatStore.appendMessage(message)
-  draft.value = ''
-  quoteTarget.value = null
-  await nextTick()
-  chatWindowRef.value?.scrollTo({ top: chatWindowRef.value.scrollHeight, behavior: 'smooth' })
-  updateScrollThumb()
-}
-
-async function sendFile(resourceType?: number) {
-  if (!chatStore.currentConversation || fileUploading.value) return
-  fileUploading.value = true
-  try {
-    const message = await window.chatApi.selectAndSendFile(chatStore.currentConversation.id, resourceType)
-    if (message) {
-      chatStore.appendMessage(message)
-      await nextTick()
-      chatWindowRef.value?.scrollTo({ top: chatWindowRef.value.scrollHeight, behavior: 'smooth' })
-    }
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '文件发送失败')
-  } finally {
-    fileUploading.value = false
+function attachmentSnapshot(attachment: PendingAttachment): PendingAttachment {
+  // Items stored in a Vue ref are reactive proxies. Electron cannot structured-clone
+  // a Proxy across contextBridge/IPC, so only send a plain data object.
+  return {
+    id: attachment.id,
+    filePath: attachment.filePath,
+    fileName: attachment.fileName,
+    fileSize: attachment.fileSize,
+    mimeType: attachment.mimeType,
+    resourceType: attachment.resourceType,
+    previewUrl: attachment.previewUrl,
   }
 }
 
-async function captureAndSend() {
-  if (!chatStore.currentConversation || fileUploading.value) return
-  fileUploading.value = true
-  try { chatStore.appendMessage(await window.chatApi.captureAndSend(chatStore.currentConversation.id)) }
-  catch (error) { ElMessage.error(error instanceof Error ? error.message : '截图发送失败') }
-  finally { fileUploading.value = false }
+function addAttachments(attachments: PendingAttachment[]) {
+  if (!attachments.length) return
+  pendingAttachments.value.push(...attachments)
+}
+
+async function selectFiles() {
+  try { addAttachments(await window.chatApi.selectAttachments()) }
+  catch (error) { ElMessage.error(error instanceof Error ? error.message : '选择文件失败') }
+}
+
+async function captureScreen() {
+  try {
+    const attachment = await window.chatApi.captureScreen()
+    if (attachment) addAttachments([attachment])
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '截图失败')
+  }
+}
+
+async function handleFileDrop(event: DragEvent) {
+  draggingFiles.value = false
+  const files = Array.from(event.dataTransfer?.files ?? [])
+  if (!files.length) return
+  try { addAttachments(await window.chatApi.stageDroppedFiles(files)) }
+  catch (error) { ElMessage.error(error instanceof Error ? error.message : '读取拖入文件失败') }
+}
+
+function removeAttachment(index: number) {
+  pendingAttachments.value.splice(index, 1)
+}
+
+type ComposerAction = { type: 'text', content: string } | { type: 'attachment', attachment: PendingAttachment }
+
+function composerActions(text: string, attachments: PendingAttachment[]) {
+  const actions: ComposerAction[] = []
+  const content = text.trim()
+  if (content) actions.push({ type: 'text', content })
+  for (const attachment of attachments) actions.push({ type: 'attachment', attachment })
+  return actions
+}
+
+function restoreActions(actions: ComposerAction[]) {
+  pendingAttachments.value = actions.flatMap((action) => action.type === 'attachment' ? [action.attachment] : [])
+  draft.value = actions.flatMap((action) => action.type === 'text' ? [action.content] : []).join('\n')
+}
+
+async function sendComposer() {
+  const conversation = chatStore.currentConversation
+  if (!conversation || composerBusy.value) return
+  const actions = composerActions(draft.value, [...pendingAttachments.value])
+  if (!actions.length) return
+  const quotedMessageId = quoteTarget.value?.id ?? null
+  draft.value = ''
+  pendingAttachments.value = []
+  quoteTarget.value = null
+  composerBusy.value = true
+  let index = 0
+  try {
+    for (; index < actions.length; index++) {
+      const action = actions[index]
+      const message = action.type === 'text'
+        ? await window.chatApi.sendMessage({ conversationId: conversation.id, senderId: appStore.currentUser?.id ?? 'me', senderName: appStore.currentUser?.nickname ?? '我', senderAvatar: appStore.currentUser?.avatar ?? '', type: 'text', content: action.content, replyMessageId: index === 0 ? quotedMessageId : null })
+        : await window.chatApi.sendAttachment(conversation.id, attachmentSnapshot(action.attachment))
+      chatStore.appendMessage(message)
+      await nextTick()
+      scrollToBottom('smooth')
+    }
+  } catch (error) {
+    restoreActions(actions.slice(index))
+    ElMessage.error(error instanceof Error ? error.message : '消息发送失败')
+  } finally {
+    composerBusy.value = false
+  }
+}
+
+function stopRecordingTracks() {
+  recordingStream?.getTracks().forEach((track) => track.stop())
+  recordingStream = null
+  window.clearInterval(recordingTimer)
+  recordingTimer = undefined
+  recording.value = false
+}
+
+async function startVoiceRecording() {
+  if (recordingBusy.value) return
+  if (recording.value) {
+    if (mediaRecorder?.state === 'recording') mediaRecorder.stop()
+    return
+  }
+  try {
+    recordingStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    const preferredType = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm']
+      .find((type) => MediaRecorder.isTypeSupported(type))
+    mediaRecorder = preferredType
+      ? new MediaRecorder(recordingStream, { mimeType: preferredType })
+      : new MediaRecorder(recordingStream)
+    recordingChunks = []
+    discardRecording = false
+    recordingConversationId = chatStore.currentConversation?.id ?? ''
+    recordingSeconds.value = 0
+    const startedAt = Date.now()
+    mediaRecorder.ondataavailable = (event) => { if (event.data.size) recordingChunks.push(event.data) }
+    mediaRecorder.onstop = async () => {
+      const recorderMimeType = mediaRecorder?.mimeType || preferredType || 'audio/webm'
+      const duration = Math.max(1, Math.round((Date.now() - startedAt) / 1000))
+      stopRecordingTracks()
+      if (discardRecording) return
+      const conversationId = recordingConversationId
+      if (!conversationId || !recordingChunks.length) return
+      recordingBusy.value = true
+      try {
+        const blob = new Blob(recordingChunks, { type: recorderMimeType })
+        const message = await window.chatApi.sendVoice(conversationId, new Uint8Array(await blob.arrayBuffer()), recorderMimeType, duration)
+        chatStore.appendMessage(message)
+        await nextTick()
+        scrollToBottom('smooth')
+      } catch (error) {
+        ElMessage.error(error instanceof Error ? error.message : '语音发送失败')
+      } finally {
+        recordingBusy.value = false
+        recordingChunks = []
+        mediaRecorder = null
+      }
+    }
+    mediaRecorder.start(250)
+    recording.value = true
+    recordingTimer = window.setInterval(() => {
+      recordingSeconds.value = Math.floor((Date.now() - startedAt) / 1000)
+      if (recordingSeconds.value >= 60 && mediaRecorder?.state === 'recording') mediaRecorder.stop()
+    }, 250)
+  } catch (error) {
+    stopRecordingTracks()
+    ElMessage.error(error instanceof Error ? error.message : '无法使用麦克风')
+  }
 }
 
 function openWallet() {
@@ -224,22 +409,65 @@ async function recallMessage(message: import('../types').Message) {
   catch (error) { ElMessage.error(error instanceof Error ? error.message : '撤回失败') }
 }
 
+async function retryMessage(message: Message) {
+  if (!message.clientMessageId) return
+  try { chatStore.appendMessage(await window.chatApi.retryMessage(message.clientMessageId)) }
+  catch (error) { ElMessage.error(error instanceof Error ? error.message : '消息重发失败') }
+}
+
 function quoteMessage(message: Message) {
   quoteTarget.value = message
 }
 
-watch(() => chatStore.currentConversationId, async () => { quoteTarget.value = null; historyKeyword.value = ''; await nextTick(); chatWindowRef.value?.scrollTo({ top: chatWindowRef.value.scrollHeight }); updateScrollThumb() })
-watch(() => chatStore.currentMessages.length, async () => { await nextTick(); updateScrollThumb() })
+function jumpToMessage(messageId: string) {
+  const target = Array.from(messageListRef.value?.querySelectorAll<HTMLElement>('[data-message-id]') ?? [])
+    .find((element) => element.dataset.messageId === messageId)
+  if (!target) {
+    ElMessage.info('原消息不在当前聊天记录中')
+    return
+  }
+  shouldStickToBottom = false
+  target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  window.clearTimeout(jumpHighlightTimer)
+  target.classList.remove('message-jump-highlight')
+  requestAnimationFrame(() => target.classList.add('message-jump-highlight'))
+  jumpHighlightTimer = window.setTimeout(() => target.classList.remove('message-jump-highlight'), 1600)
+}
+
+watch(() => chatStore.currentConversationId, (conversationId) => {
+  quoteTarget.value = null
+  historyKeyword.value = ''
+  pendingAttachments.value = []
+  draft.value = ''
+  shouldStickToBottom = true
+  void settleScrollToBottom(conversationId)
+})
+watch(() => chatStore.currentMessages.length, async (length, previousLength) => {
+  const conversationId = chatStore.currentConversationId
+  const element = chatWindowRef.value
+  const followNewMessage = length > previousLength && shouldStickToBottom && (!element || isAtBottom(element))
+  await nextTick()
+  if (conversationId !== chatStore.currentConversationId) return
+  if (followNewMessage) scrollToBottom()
+  else updateScrollThumb()
+})
 onMounted(async () => {
   await nextTick()
-  resizeObserver = new ResizeObserver(updateScrollThumb)
+  resizeObserver = new ResizeObserver(() => {
+    if (shouldStickToBottom) scrollToBottom()
+    else updateScrollThumb()
+  })
   if (chatWindowRef.value) resizeObserver.observe(chatWindowRef.value)
   if (messageListRef.value) resizeObserver.observe(messageListRef.value)
-  updateScrollThumb()
+  void settleScrollToBottom(chatStore.currentConversationId)
 })
 onBeforeUnmount(() => {
   resizeObserver?.disconnect()
   stopScrollThumbDrag()
+  window.clearTimeout(jumpHighlightTimer)
+  discardRecording = true
+  if (mediaRecorder?.state === 'recording') mediaRecorder.stop()
+  else stopRecordingTracks()
 })
 </script>
 
@@ -251,22 +479,22 @@ onBeforeUnmount(() => {
         <div class="current-session-name no-drag">{{ chatStore.currentConversation.name }} <el-icon v-if="chatStore.currentConversation.type === 'group'" class="group-mark"><ChatDotSquare /></el-icon></div>
       </header>
       <div class="chat-scroll-area no-drag">
-        <div ref="chatWindowRef" class="chat-window no-drag" @scroll="updateScrollThumb">
+        <div ref="chatWindowRef" class="chat-window no-drag" @scroll="handleChatScroll">
           <div ref="messageListRef" class="message-list">
             <template v-for="(message, index) in chatStore.currentMessages" :key="message.id">
               <div v-if="shouldShowMessageTime(chatStore.currentMessages, index)" class="message-time">{{ formatMessageTime(message.createdAt) }}</div>
-              <div v-if="message.status === 1" class="message-recall-notice">{{ recallNotice(message) }}</div>
-              <MessageBubble v-else :message="message" :own="isOwnMessage(message)" :can-recall="canRecallMessage(message)" :reply-message="findReplyMessage(message)" @recall="recallMessage" @quote="quoteMessage" />
+              <div v-if="message.status === 1" class="message-recall-notice" :data-message-id="message.id">{{ recallNotice(message) }}</div>
+              <MessageBubble v-else :message="message" :own="isOwnMessage(message)" :can-recall="canRecallMessage(message)" :reply-message="findReplyMessage(message)" :reply-sender-name="messageSenderDisplayName(findReplyMessage(message))" @recall="recallMessage" @quote="quoteMessage" @retry="retryMessage" @jump-to-message="jumpToMessage" @content-resized="handleMessageContentResized" />
             </template>
           </div>
         </div>
         <div v-show="hasScrollableContent" class="chat-scroll-thumb" :class="{ dragging: isScrollThumbDragging }" :style="{ height: `${scrollThumbHeight}px`, transform: `translateY(${scrollThumbTop}px)` }" @pointerdown="startScrollThumbDrag" />
       </div>
-      <footer class="input-area no-drag">
+      <footer class="input-area no-drag" :class="{ 'dragging-files': draggingFiles }" @dragenter.prevent="draggingFiles = true" @dragover.prevent @dragleave.self="draggingFiles = false" @drop.prevent="handleFileDrop">
         <div class="input-toolbar">
-          <button title="发送文件" :disabled="fileUploading" @click="sendFile()"><el-icon><FolderOpened /></el-icon></button>
-          <button title="截图" :disabled="fileUploading" @click="captureAndSend"><el-icon><Scissor /></el-icon></button>
-          <button title="发送语音" :disabled="fileUploading" @click="sendFile(2)"><el-icon><Microphone /></el-icon></button>
+          <button title="发送文件" :disabled="composerBusy" @click="selectFiles"><el-icon><FolderOpened /></el-icon></button>
+          <button title="截图" :disabled="composerBusy" @click="captureScreen"><el-icon><Scissor /></el-icon></button>
+          <button :title="recording ? '结束录音并发送' : '发送语音'" :class="{ recording }" :disabled="recordingBusy" @click="startVoiceRecording"><el-icon><Microphone /></el-icon></button>
           <button title="发送红包" @click="openWallet"><el-icon><Money /></el-icon></button>
           <button title="智能回复" :disabled="smartReplyBusy" @click="loadSmartReplies"><el-icon><MagicStick /></el-icon></button>
           <button v-if="chatStore.currentConversation.type === 'direct'" title="语音聊天" @click="startCall(0)"><el-icon><Phone /></el-icon></button>
@@ -274,9 +502,21 @@ onBeforeUnmount(() => {
           <button title="聊天记录" @click="historyVisible = true"><el-icon><ChatLineSquare /></el-icon></button>
         </div>
         <div v-if="smartReplies.length" class="smart-replies"><button v-for="reply in smartReplies" :key="reply" @click="draft = reply; smartReplies = []">{{ reply }}</button></div>
-        <div v-if="quoteTarget" class="quote-composer"><span><strong>{{ quoteTarget.senderName }}</strong>：{{ historyPreview(quoteTarget) }}</span><button title="取消引用" @click="quoteTarget = null"><el-icon><Close /></el-icon></button></div>
-        <el-input v-model="draft" type="textarea" resize="none" class="input-textarea" placeholder="输入消息，按 Enter 发送" @keydown.enter.exact.prevent="sendText" />
-        <div class="send-row"><el-button size="small" :disabled="!draft.trim()" @click="sendText">发送</el-button></div>
+        <div v-if="recording" class="recording-status"><i />正在录音 {{ recordingSeconds }} 秒，再次点击麦克风发送（最长 60 秒）</div>
+        <div v-if="pendingAttachments.length" class="pending-attachments">
+          <div v-for="(attachment, index) in pendingAttachments" :key="attachment.id" class="pending-attachment">
+            <img v-if="attachment.previewUrl" :src="attachment.previewUrl" :alt="attachment.fileName" />
+            <el-icon v-else><FolderOpened /></el-icon>
+            <span :title="attachment.fileName">{{ attachment.fileName }}</span>
+            <button title="移除" @click="removeAttachment(index)"><el-icon><Close /></el-icon></button>
+          </div>
+        </div>
+        <el-input v-model="draft" type="textarea" resize="none" class="input-textarea" placeholder="输入消息，按 Enter 发送；也可以拖入文件" @keydown.enter.exact.prevent="sendComposer" />
+        <div v-if="quoteTarget" class="quote-composer" title="跳转到原消息" @click="jumpToMessage(quoteTarget.id)">
+          <span><strong>{{ messageSenderDisplayName(quoteTarget) }}</strong><small>{{ quotePreview(quoteTarget) }}</small></span>
+          <button title="取消引用" @click.stop="quoteTarget = null"><el-icon><Close /></el-icon></button>
+        </div>
+        <div class="send-row"><el-button size="small" :loading="composerBusy" :disabled="!draft.trim() && !pendingAttachments.length" @click="sendComposer">发送</el-button></div>
       </footer>
     </template>
     <div v-else class="blank-chat"><el-icon><ChatDotSquare /></el-icon></div>
