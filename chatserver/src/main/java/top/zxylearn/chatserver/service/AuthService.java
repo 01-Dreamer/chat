@@ -13,6 +13,8 @@ import top.zxylearn.chatserver.entity.User;
 import top.zxylearn.chatserver.exception.BusinessException;
 import top.zxylearn.chatserver.mapper.AccountMapper;
 import top.zxylearn.chatserver.mapper.UserMapper;
+import top.zxylearn.chatserver.mq.RealtimeEvent;
+import top.zxylearn.chatserver.mq.RealtimeEventPublisher;
 import top.zxylearn.chatserver.vo.AuthSessionResponse;
 import top.zxylearn.chatserver.vo.UserProfileResponse;
 
@@ -24,23 +26,26 @@ public class AuthService {
     private final AccountMapper accountMapper;
     private final PasswordEncoder passwordEncoder;
     private final LoginRateLimiter loginRateLimiter;
+    private final RealtimeEventPublisher realtimeEventPublisher;
 
     public AuthService(
             UserService userService,
             UserMapper userMapper,
             AccountMapper accountMapper,
             PasswordEncoder passwordEncoder,
-            LoginRateLimiter loginRateLimiter) {
+            LoginRateLimiter loginRateLimiter,
+            RealtimeEventPublisher realtimeEventPublisher) {
         this.userService = userService;
         this.userMapper = userMapper;
         this.accountMapper = accountMapper;
         this.passwordEncoder = passwordEncoder;
         this.loginRateLimiter = loginRateLimiter;
+        this.realtimeEventPublisher = realtimeEventPublisher;
     }
 
-    public AuthSessionResponse register(RegisterRequest request) {
+    public UserProfileResponse register(RegisterRequest request) {
         User user = userService.register(request.username(), request.password(), request.nickname());
-        return createSession(user);
+        return profileOf(user);
     }
 
     public AuthSessionResponse login(LoginRequest request, String clientAddress) {
@@ -82,9 +87,11 @@ public class AuthService {
 
     private AuthSessionResponse createSession(User user) {
         StpUtil.login(user.getId(), new SaLoginParameter().setDeviceType("desktop"));
+        String tokenValue = StpUtil.getTokenValue();
+        realtimeEventPublisher.publish(RealtimeEvent.forcedLogout(user.getId(), tokenValue));
         return new AuthSessionResponse(
                 StpUtil.getTokenName(),
-                StpUtil.getTokenValue(),
+                tokenValue,
                 profileOf(user));
     }
 

@@ -1,6 +1,6 @@
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
-PRAGMA user_version = 2;
+PRAGMA user_version = 4;
 
 
 -- =========================================================
@@ -159,6 +159,7 @@ CREATE TABLE IF NOT EXISTS `session` (
     target_id TEXT NOT NULL,                           -- 目标ID：单聊为对方用户ID，群聊为群ID
     last_message_id TEXT DEFAULT NULL,                 -- 最后一条消息ID
     unread_count INTEGER NOT NULL DEFAULT 0,           -- 未读消息数量
+    last_read_time INTEGER NOT NULL DEFAULT 0,         -- 最近一次进入会话的时间
     is_top INTEGER NOT NULL DEFAULT 0,                 -- 是否置顶：0-否，1-是
     draft TEXT DEFAULT NULL,                           -- 输入框草稿
     last_active_time INTEGER NOT NULL,                 -- 会话最后活跃时间
@@ -169,7 +170,7 @@ CREATE TABLE IF NOT EXISTS `session` (
 );
 
 CREATE INDEX IF NOT EXISTS idx_session_order
-ON `session` (is_top DESC, last_active_time DESC);
+ON `session` (is_top DESC, created_time DESC);
 
 CREATE INDEX IF NOT EXISTS idx_session_target
 ON `session` (chat_type, target_id);

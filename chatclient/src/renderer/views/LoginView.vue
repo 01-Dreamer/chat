@@ -30,12 +30,18 @@ async function submit() {
   }
   busy.value = true
   try {
-    const user = mode.value === 'login'
-      ? await window.chatApi.login(form.username, form.password)
-      : await window.chatApi.register(form.nickname, form.username, form.password)
-    appStore.setUser(user)
-    if (mode.value === 'register') ElMessage.success('注册成功')
-    emit('authenticated')
+    if (mode.value === 'register') {
+      await window.chatApi.register(form.nickname, form.username, form.password)
+      form.password = ''
+      form.confirmPassword = ''
+      mode.value = 'login'
+      window.chatApi.setWindowMode('login')
+      ElMessage.success('注册成功，请使用新账号登录')
+    } else {
+      const user = await window.chatApi.login(form.username, form.password)
+      appStore.setUser(user)
+      emit('authenticated')
+    }
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '操作失败')
   } finally {

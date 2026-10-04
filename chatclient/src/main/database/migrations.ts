@@ -86,13 +86,14 @@ CREATE TABLE IF NOT EXISTS session (
   target_id TEXT NOT NULL,
   last_message_id TEXT,
   unread_count INTEGER NOT NULL DEFAULT 0,
+  last_read_time INTEGER NOT NULL DEFAULT 0,
   is_top INTEGER NOT NULL DEFAULT 0,
   draft TEXT,
   last_active_time INTEGER NOT NULL,
   created_time INTEGER NOT NULL,
   updated_time INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_session_order ON session (is_top DESC, last_active_time DESC);
+CREATE INDEX IF NOT EXISTS idx_session_order ON session (is_top DESC, created_time DESC);
 CREATE INDEX IF NOT EXISTS idx_session_target ON session (chat_type, target_id);
 
 CREATE TABLE IF NOT EXISTS message (
@@ -226,9 +227,32 @@ export function initializeDatabase(database: DatabaseSync) {
 }
 
 function applyMigrations(database: DatabaseSync) {
+  const versionRow = database.prepare('PRAGMA user_version').get() as { user_version?: number } | undefined
+  const previousVersion = Number(versionRow?.user_version ?? 0)
   const columns = database.prepare('PRAGMA table_info(`group`)').all() as Array<{ name: string }>
   if (!columns.some((column) => column.name === 'avatar_local_path')) {
     database.exec('ALTER TABLE `group` ADD COLUMN avatar_local_path TEXT DEFAULT NULL')
   }
-  database.exec('PRAGMA user_version = 2')
+  const sessionColumns = database.prepare('PRAGMA table_info(session)').all() as Array<{ name: string }>
+  if (!sessionColumns.some((column) => column.name === 'last_read_time')) {
+    database.exec('ALTER TABLE session ADD COLUMN last_read_time INTEGER NOT NULL DEFAULT 0')
+  }
+  const now = Date.now()
+  if (previousVersion < 4) {
+    // Versions before v4 can contain counters polluted by inbox replay. v3
+    // introduced the watermark, but some databases were already marked v3
+    // before the legacy counters were cleaned, so v4 resets them once.
+    database.prepare('UPDATE session SET unread_count = 0, last_read_time = ?').run(now)
+  } else {
+    database.prepare(`
+      UPDATE session SET last_read_time = ? WHERE last_read_time = 0 AND unread_count = 0
+    `).run(now)
+  }
+  // Older databases indexed session activity time. Rebuild the index so
+  // existing sessions use the same creation-time ordering as new databases.
+  database.exec('DROP INDEX IF EXISTS idx_session_order; CREATE INDEX idx_session_order ON session (is_top DESC, created_time DESC);')
+  // Recalled content must never survive locally, including rows written by
+  // older client versions before content scrubbing was introduced.
+  database.exec('UPDATE message SET content = NULL WHERE status = 1;')
+  database.exec('PRAGMA user_version = 4')
 }

@@ -152,6 +152,16 @@ export interface FileResource {
   updatedTime: number
 }
 
+export interface PendingAttachment {
+  id: string
+  filePath: string
+  fileName: string
+  fileSize: number
+  mimeType: string
+  resourceType: number
+  previewUrl: string | null
+}
+
 export interface WalletAccount {
   id: string
   userId: string
@@ -212,6 +222,8 @@ export interface Conversation {
   unread: number
   targetId: string
   pinned?: boolean
+  lastActiveTime?: number
+  createdTime?: number
 }
 
 export interface OpenConversationResult {

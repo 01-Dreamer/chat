@@ -25,7 +25,11 @@ function closeContextMenu() {
 
 async function selectConversation(conversation: Conversation) {
   chatStore.selectConversation(conversation.id)
-  try { await window.chatApi.markSessionRead(conversation.id) } catch { /* Keep the local UI responsive. */ }
+  try {
+    await window.chatApi.setActiveSession(conversation.id)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '未读状态保存失败')
+  }
 }
 
 async function togglePinned() {

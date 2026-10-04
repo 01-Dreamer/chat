@@ -52,6 +52,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
+        if (Boolean.TRUE.equals(session.getAttributes().get("forcedLogout"))) return;
         IncomingMessage incoming;
         try {
             incoming = objectMapper.readValue(message.getPayload(), IncomingMessage.class);
@@ -116,6 +117,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     @Override
     public void handleTransportError(WebSocketSession session, Throwable exception) {
         registry.remove(userId(session), deviceId(session), session);
+        try {
+            session.close(CloseStatus.SERVER_ERROR);
+        } catch (Exception ignored) {
+        }
     }
 
     private void sendError(WebSocketSession session, String clientMessageId, String code, String message) {

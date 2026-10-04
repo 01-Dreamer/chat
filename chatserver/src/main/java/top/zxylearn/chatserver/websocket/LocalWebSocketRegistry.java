@@ -56,7 +56,36 @@ public class LocalWebSocketRegistry {
                 synchronized (session) {
                     session.sendMessage(new TextMessage(json));
                 }
-            } catch (IOException exception) {
+            } catch (Exception exception) {
+                remove(userId, deviceId, session);
+                try {
+                    session.close();
+                } catch (IOException ignored) {
+                }
+            }
+        });
+    }
+
+    public void forceLogout(long userId, String currentToken, String message) {
+        Map<String, WebSocketSession> userSessions = sessions.get(userId);
+        if (userSessions == null || userSessions.isEmpty()) return;
+        String json;
+        try {
+            json = objectMapper.writeValueAsString(Map.of(
+                    "type", "FORCED_LOGOUT",
+                    "data", Map.of("message", message)));
+        } catch (Exception exception) {
+            return;
+        }
+        userSessions.forEach((deviceId, session) -> {
+            if (currentToken.equals(String.valueOf(session.getAttributes().get("token")))) return;
+            session.getAttributes().put("forcedLogout", true);
+            try {
+                synchronized (session) {
+                    if (session.isOpen()) session.sendMessage(new TextMessage(json));
+                }
+            } catch (Exception ignored) {
+            } finally {
                 remove(userId, deviceId, session);
             }
         });

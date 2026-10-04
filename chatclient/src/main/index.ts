@@ -1,6 +1,6 @@
-import { app, BrowserWindow, ipcMain, screen, type Rectangle } from 'electron'
+import { app, BrowserWindow, ipcMain, screen, shell, type Rectangle } from 'electron'
 import { join } from 'node:path'
-import type { IpcResult } from './types'
+import type { IpcResult, PendingAttachment } from './types'
 import { databaseManager } from './database/databaseManager'
 import { authService } from './services/authService'
 import { friendService } from './services/friendService'
@@ -39,11 +39,7 @@ function registerIpc() {
     return user
   }))
   ipcMain.handle('auth:register', (_event, nickname: string, username: string, password: string) => asIpcResult(async () => {
-    const user = await authService.register(nickname, username, password)
-    initializeUserDatabase(user)
-    avatarCacheService.cacheCurrentUser(user)
-    realtimeService.connect(user.id)
-    return user
+    return authService.register(nickname, username, password)
   }))
   ipcMain.handle('auth:logout', () => asIpcResult(async () => {
     realtimeService.disconnect()
@@ -64,7 +60,7 @@ function registerIpc() {
       notificationService.list().catch(() => databaseManager.loadCachedNotifications()),
     ])
     realtimeService.connect(user.id)
-    const chatData = databaseManager.loadChatState()
+    const chatData = databaseManager.loadSessionState()
     return {
       user: { ...user, avatar: databaseManager.getDisplayAvatar('user', user.id) ?? user.avatar },
       friends: friendData.friends,
@@ -75,25 +71,51 @@ function registerIpc() {
       notifications,
     }
   })
-  ipcMain.handle('sessions:localState', () => databaseManager.loadChatState())
+  ipcMain.handle('sessions:localState', () => databaseManager.loadSessionState())
+  ipcMain.handle('sessions:messages', (_event, chatKey: string) => databaseManager.loadConversationMessages(chatKey))
   ipcMain.handle('sessions:setPinned', (_event, chatKey: string, pinned: boolean) => {
     databaseManager.setSessionPinned(chatKey, pinned)
     return databaseManager.loadConversations()
   })
   ipcMain.handle('sessions:markRead', (_event, chatKey: string) => databaseManager.markSessionRead(chatKey))
+  ipcMain.handle('sessions:setActive', (_event, chatKey: string | null) => databaseManager.setActiveChat(chatKey))
   ipcMain.handle('sessions:hide', (_event, chatKey: string) => databaseManager.hideSession(chatKey))
   ipcMain.handle('chat:sendMessage', (_event, message) => messageService.sendText(message))
-  ipcMain.handle('chat:selectAndSendFile', async (_event, conversationId: string, resourceType?: number) => {
-    const resource = await fileService.selectAndUpload(resourceType)
-    return resource ? messageService.sendFile(conversationId, resource) : null
+  ipcMain.handle('files:selectAttachments', () => fileService.selectAttachments())
+  ipcMain.handle('files:stagePaths', (_event, paths: string[]) => fileService.stagePaths(paths))
+  ipcMain.handle('files:capture', () => fileService.captureScreen())
+  ipcMain.handle('chat:sendAttachment', async (_event, conversationId: string, attachment: PendingAttachment) => {
+    const resource = await fileService.upload(attachment.filePath, attachment.resourceType)
+    return messageService.sendFile(conversationId, resource)
   })
-  ipcMain.handle('chat:captureAndSend', async (_event, conversationId: string) => {
-    const resource = await fileService.captureScreen()
+  ipcMain.handle('chat:sendVoice', async (_event, conversationId: string, bytes: Uint8Array, mimeType: string, duration: number) => {
+    const filePath = await fileService.saveVoice(bytes, mimeType)
+    const resource = await fileService.upload(filePath, 2, Math.max(1, Math.round(duration)), mimeType)
     return messageService.sendFile(conversationId, resource)
   })
   ipcMain.handle('files:open', (_event, resourceId: string) => fileService.openResource(resourceId))
+  ipcMain.handle('files:loadVoice', (_event, resourceId: string) => fileService.loadVoice(resourceId))
+  ipcMain.handle('files:loadImage', (_event, resourceId: string) => fileService.loadImage(resourceId))
+  ipcMain.handle('files:downloadDocument', async (event, resourceId: string) => {
+    let lastSentAt = 0
+    let lastPercent = -1
+    const path = await fileService.downloadDocument(resourceId, (received, total) => {
+      const percent = total > 0 ? Math.min(100, Math.round((received / total) * 100)) : 0
+      const now = Date.now()
+      if (percent !== 100 && percent === lastPercent && now - lastSentAt < 100) return
+      if (percent !== 100 && now - lastSentAt < 100) return
+      lastSentAt = now
+      lastPercent = percent
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('files:downloadProgress', { resourceId, received, total, percent })
+      }
+    })
+    shell.showItemInFolder(path)
+    return true
+  })
   ipcMain.handle('chat:openConversation', (_event, type: 'direct' | 'group', targetId: string) => messageService.openConversation(type, targetId))
   ipcMain.handle('chat:recall', (_event, messageId: string) => messageService.recall(messageId))
+  ipcMain.handle('chat:retry', (_event, clientMessageId: string) => messageService.retry(clientMessageId))
   ipcMain.handle('profile:update', (_event, patch) => profileService.update(patch))
   ipcMain.handle('profile:updateAvatar', async () => {
     const resource = await fileService.selectAndUpload(0)
@@ -263,6 +285,9 @@ function createWindow() {
   mainWindow.on('maximize', () => mainWindow?.webContents.send('window:maximizedChanged', true))
   mainWindow.on('unmaximize', () => mainWindow?.webContents.send('window:maximizedChanged', false))
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
+    callback(permission === 'media')
+  })
   realtimeService.setEventSink((event) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('chat:event', event)
   })

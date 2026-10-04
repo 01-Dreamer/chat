@@ -24,12 +24,12 @@ import top.zxylearn.chatserver.mapper.CallRecordMapper;
 import top.zxylearn.chatserver.mapper.FileResourceAccessMapper;
 import top.zxylearn.chatserver.vo.MessageResponse;
 
-import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 @Service
@@ -38,6 +38,7 @@ public class MessagePersistenceService {
     private static final int CHAT_DIRECT = 0;
     private static final int CHAT_GROUP = 1;
     private static final int MESSAGE_TEXT = 0;
+    private static final int MESSAGE_RED_PACKET = 2;
     private static final int MESSAGE_FILE = 1;
     private static final int MESSAGE_RECALLED = 1;
     private static final int ROLE_ADMIN = 1;
@@ -54,6 +55,7 @@ public class MessagePersistenceService {
     private final RedPacketMapper redPacketMapper;
     private final CallRecordMapper callRecordMapper;
     private final FileResourceAccessMapper fileResourceAccessMapper;
+    private final ChatAccessCache chatAccessCache;
 
     public MessagePersistenceService(
             MessageMapper messageMapper,
@@ -64,7 +66,8 @@ public class MessagePersistenceService {
             RedPacketMapper redPacketMapper,
             CallRecordMapper callRecordMapper,
             FileResourceAccessMapper fileResourceAccessMapper,
-            ReliableEventService reliableEventService) {
+            ReliableEventService reliableEventService,
+            ChatAccessCache chatAccessCache) {
         this.messageMapper = messageMapper;
         this.friendMapper = friendMapper;
         this.groupMapper = groupMapper;
@@ -74,6 +77,7 @@ public class MessagePersistenceService {
         this.callRecordMapper = callRecordMapper;
         this.fileResourceAccessMapper = fileResourceAccessMapper;
         this.reliableEventService = reliableEventService;
+        this.chatAccessCache = chatAccessCache;
     }
 
     @Transactional
@@ -107,7 +111,7 @@ public class MessagePersistenceService {
         message.setCreatedTime(now);
         message.setUpdatedTime(now);
         messageMapper.insert(message);
-        ReliableEventService.EventDelivery delivery = reliableEventService.append(
+        ReliableEventService.EventDelivery delivery = reliableEventService.appendForLockedUsers(
                 EVENT_MESSAGE, message.getId(), recipients, now);
         return new PersistedMessage(MessageResponse.from(message), delivery.sequences(), false);
     }
@@ -147,11 +151,18 @@ public class MessagePersistenceService {
 
     private List<Long> resolveRecipients(long senderId, int chatType, long targetId) {
         if (chatType == CHAT_DIRECT) {
-            long relationCount = friendMapper.selectCount(new LambdaQueryWrapper<Friend>()
-                    .and(wrapper -> wrapper
-                            .nested(pair -> pair.eq(Friend::getUserId, senderId).eq(Friend::getFriendId, targetId))
-                            .or(pair -> pair.eq(Friend::getUserId, targetId).eq(Friend::getFriendId, senderId))));
-            if (relationCount != 2) {
+            Optional<Boolean> cached = chatAccessCache.getDirectAccess(senderId, targetId);
+            boolean allowed;
+            if (cached.isPresent()) {
+                allowed = cached.get();
+            } else {
+                allowed = friendMapper.selectCount(new LambdaQueryWrapper<Friend>()
+                        .and(wrapper -> wrapper
+                                .nested(pair -> pair.eq(Friend::getUserId, senderId).eq(Friend::getFriendId, targetId))
+                                .or(pair -> pair.eq(Friend::getUserId, targetId).eq(Friend::getFriendId, senderId)))) == 2;
+                chatAccessCache.cacheDirectAccess(senderId, targetId, allowed);
+            }
+            if (!allowed) {
                 throw new BusinessException("NOT_FRIEND", "当前已经不是好友关系", HttpStatus.CONFLICT);
             }
             return senderId == targetId ? List.of(senderId) : orderedUnique(List.of(senderId, targetId));
@@ -159,16 +170,21 @@ public class MessagePersistenceService {
         if (chatType != CHAT_GROUP) {
             throw new BusinessException("INVALID_CHAT_TYPE", "聊天类型不正确", HttpStatus.BAD_REQUEST);
         }
-        Group group = groupMapper.selectById(targetId);
-        if (group == null || group.getStatus() == null || group.getStatus() != 1) {
-            throw new BusinessException("GROUP_NOT_FOUND", "群聊不存在或已解散", HttpStatus.NOT_FOUND);
-        }
-        List<GroupMember> members = memberMapper.selectList(new LambdaQueryWrapper<GroupMember>()
-                .eq(GroupMember::getGroupId, targetId));
-        if (members.stream().noneMatch(member -> member.getUserId() == senderId)) {
+        List<Long> recipients = chatAccessCache.getGroupRecipients(targetId).orElseGet(() -> {
+            Group group = groupMapper.selectById(targetId);
+            if (group == null || group.getStatus() == null || group.getStatus() != 1) {
+                throw new BusinessException("GROUP_NOT_FOUND", "群聊不存在或已解散", HttpStatus.NOT_FOUND);
+            }
+            List<Long> memberIds = orderedUnique(memberMapper.selectList(new LambdaQueryWrapper<GroupMember>()
+                            .eq(GroupMember::getGroupId, targetId))
+                    .stream().map(GroupMember::getUserId).toList());
+            chatAccessCache.cacheGroupRecipients(targetId, memberIds);
+            return memberIds;
+        });
+        if (!recipients.contains(senderId)) {
             throw new BusinessException("GROUP_NOT_MEMBER", "你已不在该群聊中", HttpStatus.FORBIDDEN);
         }
-        return orderedUnique(members.stream().map(GroupMember::getUserId).toList());
+        return recipients;
     }
 
     private void validateCommand(SendMessageCommand command) {
@@ -233,10 +249,10 @@ public class MessagePersistenceService {
     }
 
     private void checkRecallPermission(long currentUserId, Message message) {
+        if (message.getMessageType() == MESSAGE_RED_PACKET) {
+            throw new BusinessException("RED_PACKET_RECALL_FORBIDDEN", "红包消息不能撤回", HttpStatus.CONFLICT);
+        }
         if (message.getSenderId() == currentUserId) {
-            if (Duration.between(message.getCreatedTime(), LocalDateTime.now()).toMinutes() >= 5) {
-                throw new BusinessException("MESSAGE_RECALL_EXPIRED", "消息发送超过5分钟，无法撤回", HttpStatus.CONFLICT);
-            }
             return;
         }
         if (message.getChatType() != CHAT_GROUP) {

@@ -1,12 +1,20 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
-import { Document, Money, VideoPlay } from '@element-plus/icons-vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { Document, Loading, Money, WarningFilled, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import { useAppStore } from '../stores/app'
 import type { Message } from '../types'
 import AvatarDisplay from './AvatarDisplay.vue'
 
-const props = defineProps<{ message: Message; own: boolean; canRecall: boolean; replyMessage?: Message }>()
-const emit = defineEmits<{ recall: [message: Message]; quote: [message: Message] }>()
+const props = defineProps<{ message: Message; own: boolean; canRecall: boolean; replyMessage?: Message; replySenderName?: string }>()
+const appStore = useAppStore()
+const emit = defineEmits<{
+  recall: [message: Message]
+  quote: [message: Message]
+  retry: [message: Message]
+  'jump-to-message': [messageId: string]
+  'content-resized': []
+}>()
 const showTranscript = ref(false)
 const translatedText = ref('')
 const translating = ref(false)
@@ -16,11 +24,37 @@ const voiceUnread = ref(!props.own && props.message.read === false)
 const downloadingVideo = ref(false)
 const videoUrl = ref('')
 const resourceUrl = ref('')
+const imageLoading = ref(false)
+const imageLoadFailed = ref(false)
+const downloadingDocument = ref(false)
+const documentDownloadProgress = ref(0)
 const contextMenuVisible = ref(false)
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
 let voiceTimer: number | undefined
 let audio: HTMLAudioElement | undefined
+let voiceObjectUrl = ''
+let imageObjectUrl = ''
+let removeDownloadProgressListener: (() => void) | undefined
+
+const displayAvatar = computed(() => props.own ? appStore.currentUser?.avatar : props.message.senderAvatar)
+const displayName = computed(() => props.own
+  ? (appStore.currentUser?.nickname || props.message.senderName)
+  : props.message.senderName)
+
+const replyPreview = computed(() => {
+  const message = props.replyMessage
+  if (!message) return '原消息暂不可用'
+  if (message.status === 1) return '[消息已撤回]'
+  if (message.type === 'red_packet') return '[红包]'
+  if (message.type === 'voice') return '[语音]'
+  if (message.type === 'file') {
+    if (message.fileKind === 'image') return '[图片]'
+    if (message.fileKind === 'video') return '[视频]'
+    return '[文件]'
+  }
+  return message.content || '[消息]'
+})
 
 async function openResource() {
   if (!props.message.referenceId) return
@@ -30,24 +64,56 @@ async function openResource() {
 }
 
 async function downloadDocument() {
-  const url = await openResource()
-  if (!url) return
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = props.message.fileName ?? '下载文件'
-  anchor.click()
-  ElMessage.success('文件已开始下载')
+  if (!props.message.referenceId || downloadingDocument.value) return
+  downloadingDocument.value = true
+  documentDownloadProgress.value = 0
+  try {
+    await window.chatApi.downloadFile(props.message.referenceId)
+    documentDownloadProgress.value = 100
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '文件下载失败')
+  } finally {
+    downloadingDocument.value = false
+  }
+}
+
+async function loadImage() {
+  if (!props.message.referenceId || imageLoading.value || resourceUrl.value) return
+  imageLoading.value = true
+  imageLoadFailed.value = false
+  try {
+    const source = await window.chatApi.loadImage(props.message.referenceId)
+    const bytes = source.bytes instanceof Uint8Array ? source.bytes : new Uint8Array(source.bytes)
+    const blob = new Blob([bytes.slice().buffer], { type: source.mimeType })
+    if (imageObjectUrl) URL.revokeObjectURL(imageObjectUrl)
+    imageObjectUrl = URL.createObjectURL(blob)
+    resourceUrl.value = imageObjectUrl
+  } catch {
+    imageLoadFailed.value = true
+  } finally {
+    imageLoading.value = false
+  }
+}
+
+function handleImageLoaded() {
+  imageLoadFailed.value = false
+  emit('content-resized')
 }
 
 async function playVoice() {
   voiceUnread.value = false
   try {
-    const url = await openResource()
-    if (!url) return
+    if (!props.message.referenceId) return
+    const source = await window.chatApi.loadVoice(props.message.referenceId)
+    const bytes = source.bytes instanceof Uint8Array ? source.bytes : new Uint8Array(source.bytes)
+    const blob = new Blob([bytes.slice().buffer], { type: source.mimeType })
     audio?.pause()
-    audio = new Audio(url)
+    if (voiceObjectUrl) URL.revokeObjectURL(voiceObjectUrl)
+    voiceObjectUrl = URL.createObjectURL(blob)
+    audio = new Audio(voiceObjectUrl)
     voicePlaying.value = true
     audio.onended = () => { voicePlaying.value = false }
+    audio.onerror = () => { voicePlaying.value = false }
     await audio.play()
   } catch (error) {
     voicePlaying.value = false
@@ -109,33 +175,59 @@ async function downloadAndPlayVideo() {
 onBeforeUnmount(() => {
   window.clearTimeout(voiceTimer)
   audio?.pause()
+  if (voiceObjectUrl) URL.revokeObjectURL(voiceObjectUrl)
+  if (imageObjectUrl) URL.revokeObjectURL(imageObjectUrl)
+  removeDownloadProgressListener?.()
   document.removeEventListener('click', closeContextMenu)
   window.removeEventListener('blur', closeContextMenu)
 })
 
 onMounted(() => {
-  if (props.message.fileKind === 'image') void openResource().catch(() => undefined)
+  removeDownloadProgressListener = window.chatApi.onFileDownloadProgress((progress) => {
+    if (progress.resourceId !== props.message.referenceId) return
+    documentDownloadProgress.value = Math.max(0, Math.min(100, progress.percent))
+  })
   document.addEventListener('click', closeContextMenu)
   window.addEventListener('blur', closeContextMenu)
 })
+
+watch(
+  () => [props.message.fileKind, props.message.referenceId] as const,
+  ([fileKind, referenceId], previous) => {
+    if (fileKind !== 'image' || !referenceId) return
+    if (previous && previous[1] !== referenceId) {
+      if (imageObjectUrl) URL.revokeObjectURL(imageObjectUrl)
+      imageObjectUrl = ''
+      resourceUrl.value = ''
+      imageLoadFailed.value = false
+    }
+    void loadImage()
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
-  <div class="message-body" :class="{ 'self-message': own }">
-    <AvatarDisplay :src="message.senderAvatar" :name="message.senderName" :size="35" class="message-avatar" />
+  <div class="message-body" :class="{ 'self-message': own }" :data-message-id="message.id">
+    <AvatarDisplay :src="displayAvatar" :name="displayName" :size="35" class="message-avatar" />
     <div class="message-content" @contextmenu.prevent.stop="openContextMenu">
       <div v-if="!own" class="nickname">{{ message.senderName }}</div>
       <div v-if="message.status === 1" class="text-msg recalled-message">该消息已撤回</div>
       <template v-else-if="message.type === 'text'">
-        <div v-if="message.replyMessageId" class="quoted-message"><strong>{{ replyMessage?.senderName || '引用消息' }}</strong><span>{{ replyMessage?.content || '原消息暂不可用' }}</span></div>
         <div class="text-msg">{{ message.content }}</div>
         <div v-if="translating" class="translation-loading">翻译中…</div>
         <div v-if="translatedText" class="voice-transcript">{{ translatedText }}</div>
+        <button v-if="message.replyMessageId" class="quoted-message" title="跳转到原消息" @click.stop="emit('jump-to-message', message.replyMessageId)">
+          <strong>{{ replySenderName || replyMessage?.senderName || '引用消息' }}:</strong>
+          <span>{{ replyPreview }}</span>
+        </button>
       </template>
 
       <template v-else-if="message.type === 'file'">
         <div v-if="message.fileKind === 'image'" class="img-msg">
-          <img :src="resourceUrl" :alt="message.fileName || '聊天图片'" class="image-content" />
+          <img v-if="resourceUrl" :src="resourceUrl" :alt="message.fileName || '聊天图片'" class="image-content" @load="handleImageLoaded" @error="imageLoadFailed = true; resourceUrl = ''" />
+          <span v-else-if="imageLoadFailed" class="image-placeholder failed" @click="loadImage">图片加载失败，点击重试</span>
+          <span v-else class="image-placeholder">图片加载中…</span>
         </div>
         <div v-else-if="message.fileKind === 'video'" class="video-msg">
           <video v-if="videoUrl" :src="videoUrl" class="video-player" controls autoplay muted />
@@ -146,8 +238,12 @@ onMounted(() => {
           </button>
           <span class="video-meta">{{ message.fileName }} · {{ message.fileSize }}</span>
         </div>
-        <button v-else class="file-msg" @click="downloadDocument">
-          <span class="file-copy"><strong>{{ message.fileName }}</strong><small>{{ message.fileSize }}</small></span>
+        <button v-else class="file-msg" :disabled="downloadingDocument" @click="downloadDocument">
+          <span class="file-copy">
+            <strong>{{ message.fileName }}</strong>
+            <small>{{ downloadingDocument ? `正在下载 ${documentDownloadProgress}%` : message.fileSize }}</small>
+            <span v-if="downloadingDocument" class="file-download-track"><i :style="{ width: `${documentDownloadProgress}%` }" /></span>
+          </span>
           <el-icon :size="34"><Document /></el-icon>
         </button>
       </template>
@@ -166,6 +262,8 @@ onMounted(() => {
         <div v-if="showTranscript" class="voice-transcript">{{ message.transcript || '暂时无法识别该语音消息' }}</div>
       </template>
     </div>
+    <span v-if="own && message.sendStatus === 'sending'" class="message-send-state sending" title="发送中"><el-icon><Loading /></el-icon></span>
+    <button v-else-if="own && message.sendStatus === 'failed'" class="message-send-state failed" title="发送失败，点击重试" @click="emit('retry', message)"><el-icon><WarningFilled /></el-icon></button>
     <Teleport to="body">
       <div v-if="contextMenuVisible" class="message-context-menu no-drag" :style="{ left: `${contextMenuX}px`, top: `${contextMenuY}px` }" @click.stop @contextmenu.prevent>
         <button v-if="message.type === 'text'" :disabled="translating" @click="runContextAction('translate')">{{ translatedText ? '收起翻译' : '翻译' }}</button>

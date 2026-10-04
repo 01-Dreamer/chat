@@ -8,6 +8,7 @@ import { initializeDatabase } from './migrations'
 class DatabaseManager {
   private database: DatabaseSync | null = null
   private currentUserId = ''
+  private activeChatKey: string | null = null
 
   openForUser(userId: string) {
     if (!/^\d+$/.test(userId)) throw new Error('用户 ID 格式不正确')
@@ -18,6 +19,9 @@ class DatabaseManager {
     mkdirSync(databaseDirectory, { recursive: true })
     const database = new DatabaseSync(join(databaseDirectory, 'chat.sqlite'))
     initializeDatabase(database)
+    // A process restart loses the in-memory WebSocket acknowledgement tracker.
+    // Leave these messages retryable instead of displaying an endless spinner.
+    database.prepare('UPDATE message SET send_status = 2 WHERE send_status = 0').run()
     this.database = database
     this.currentUserId = userId
   }
@@ -264,9 +268,15 @@ class DatabaseManager {
   }
 
   markSessionRead(chatKey: string) {
+    const now = Date.now()
     this.requireDatabase().prepare(`
-      UPDATE session SET unread_count = 0, updated_time = ? WHERE chat_key = ?
-    `).run(Date.now(), chatKey)
+      UPDATE session SET unread_count = 0, last_read_time = MAX(last_read_time, ?), updated_time = ? WHERE chat_key = ?
+    `).run(now, now, chatKey)
+  }
+
+  setActiveChat(chatKey: string | null) {
+    this.activeChatKey = chatKey
+    if (chatKey) this.markSessionRead(chatKey)
   }
 
   hideSession(chatKey: string) {
@@ -290,7 +300,7 @@ class DatabaseManager {
         message.type === 'text' ? 0 : message.type === 'file' || message.type === 'voice' ? 1 : message.type === 'red_packet' ? 2 : 3,
         message.content, message.referenceId ?? null, message.replyMessageId ?? null, now, now,
       )
-      this.upsertSessionForMessage(database, message.chatKey!, chatType, targetId, now, false)
+      this.upsertSessionForMessage(database, message.chatKey!, chatType, targetId, now, false, message.clientMessageId)
       database.exec('COMMIT')
     } catch (error) {
       database.exec('ROLLBACK')
@@ -298,11 +308,11 @@ class DatabaseManager {
     }
   }
 
-  applyRealtimeMessage(message: ServerMessage) {
+  applyRealtimeMessage(message: ServerMessage, forceIncomingDelivery = false) {
     const database = this.requireDatabase()
     database.exec('BEGIN IMMEDIATE')
     try {
-      this.upsertServerMessage(database, message)
+      this.upsertServerMessage(database, message, forceIncomingDelivery)
       database.exec('COMMIT')
     } catch (error) {
       database.exec('ROLLBACK')
@@ -329,7 +339,8 @@ class DatabaseManager {
     const database = this.requireDatabase()
     database.exec('BEGIN IMMEDIATE')
     try {
-      for (const message of messages) this.upsertServerMessage(database, message)
+      // Opening history must never turn old messages into unread messages.
+      for (const message of messages) this.upsertServerMessage(database, message, false, false)
       database.exec('COMMIT')
     } catch (error) { database.exec('ROLLBACK'); throw error }
   }
@@ -350,6 +361,34 @@ class DatabaseManager {
     this.requireDatabase().prepare(`
       UPDATE message SET send_status = 2, updated_time = ? WHERE client_message_id = ?
     `).run(Date.now(), clientMessageId)
+  }
+
+  prepareMessageRetry(clientMessageId: string) {
+    const database = this.requireDatabase()
+    const row = database.prepare(`
+      SELECT m.*, u.nickname AS sender_name, u.avatar_url AS sender_avatar,
+             recaller.nickname AS recall_operator_name
+      FROM message m
+      LEFT JOIN user u ON u.id = m.sender_id
+      LEFT JOIN user recaller ON recaller.id = m.recall_operator_id
+      WHERE m.client_message_id = ? AND m.sender_id = ? LIMIT 1
+    `).get(clientMessageId, this.currentUserId) as Record<string, unknown> | undefined
+    if (!row) throw new Error('没有找到需要重发的消息')
+    database.prepare('UPDATE message SET send_status = 0, updated_time = ? WHERE local_id = ?')
+      .run(Date.now(), Number(row.local_id))
+    row.send_status = 0
+    return {
+      message: this.localRowToUiMessage(row),
+      payload: {
+        clientMessageId: String(row.client_message_id),
+        chatType: Number(row.chat_type),
+        targetId: String(row.target_id),
+        messageType: Number(row.message_type),
+        content: row.content == null ? null : String(row.content),
+        referenceId: row.reference_id == null ? null : String(row.reference_id),
+        replyMessageId: row.reply_message_id == null ? null : String(row.reply_message_id),
+      },
+    }
   }
 
   getLastSequence() {
@@ -390,11 +429,19 @@ class DatabaseManager {
     return { conversations, messages }
   }
 
+  loadSessionState(): { conversations: Conversation[], messages: Record<string, Message[]> } {
+    return { conversations: this.loadConversations(), messages: {} }
+  }
+
   loadConversations() {
     const rows = this.requireDatabase().prepare(`
-      SELECT chat_key FROM session ORDER BY is_top DESC, last_active_time DESC
+      SELECT chat_key FROM session ORDER BY is_top DESC, created_time DESC
     `).all() as Array<{ chat_key: string }>
     return rows.map((row) => this.loadConversation(row.chat_key)).filter(Boolean) as Conversation[]
+  }
+
+  getConversation(chatKey: string) {
+    return this.loadConversation(chatKey)
   }
 
   upsertFileResource(resource: FileResource, downloadStatus: number) {
@@ -483,6 +530,7 @@ class DatabaseManager {
     this.database?.close()
     this.database = null
     this.currentUserId = ''
+    this.activeChatKey = null
   }
 
   private requireDatabase() {
@@ -608,10 +656,18 @@ class DatabaseManager {
     }
   }
 
-  private upsertServerMessage(database: DatabaseSync, message: ServerMessage) {
+  private upsertServerMessage(
+    database: DatabaseSync,
+    message: ServerMessage,
+    forceIncomingDelivery = false,
+    countUnread = true,
+  ) {
     const existing = database.prepare(`
       SELECT 1 FROM message WHERE id = ? OR (sender_id = ? AND client_message_id = ?) LIMIT 1
     `).get(message.id, message.senderId, message.clientMessageId)
+    const sessionState = database.prepare(`
+      SELECT last_read_time FROM session WHERE chat_key = ? LIMIT 1
+    `).get(message.chatKey) as { last_read_time?: number } | undefined
     database.prepare(`
       INSERT INTO message (
         id, client_message_id, chat_key, sender_id, chat_type, target_id, message_type,
@@ -619,28 +675,38 @@ class DatabaseManager {
         send_status, created_time, updated_time
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
       ON CONFLICT(sender_id, client_message_id) DO UPDATE SET
-        id=excluded.id, content=excluded.content, reference_id=excluded.reference_id,
+        id=excluded.id,
+        content=CASE WHEN excluded.status = 1 THEN NULL ELSE excluded.content END,
+        reference_id=excluded.reference_id,
         reply_message_id=excluded.reply_message_id, status=excluded.status,
         recall_operator_id=excluded.recall_operator_id, recalled_time=excluded.recalled_time,
         send_status=1, updated_time=excluded.updated_time
     `).run(
       message.id, message.clientMessageId, message.chatKey, message.senderId,
-      message.chatType, message.targetId, message.messageType, message.content,
+      message.chatType, message.targetId, message.messageType, message.status === 1 ? null : message.content,
       message.referenceId, message.replyMessageId, message.status,
       message.recallOperatorId, message.recalledTime, message.createdTime, message.updatedTime,
     )
     const targetId = message.chatType === 0
       ? (message.senderId === this.currentUserId ? message.targetId : message.senderId)
       : message.targetId
-    this.upsertSessionForMessage(
-      database,
-      message.chatKey,
-      message.chatType,
-      targetId,
-      message.createdTime,
-      !existing && message.senderId !== this.currentUserId,
-      message.id,
-    )
+    // Replayed websocket/inbox events must not recreate a session the user
+    // explicitly hid. A genuinely new message is allowed to bring it back.
+    if (sessionState || !existing || forceIncomingDelivery) {
+      const incoming = countUnread
+        && message.chatKey !== this.activeChatKey
+        && message.createdTime > Number(sessionState?.last_read_time ?? 0)
+        && (forceIncomingDelivery || (!existing && message.senderId !== this.currentUserId))
+      this.upsertSessionForMessage(
+        database,
+        message.chatKey,
+        message.chatType,
+        targetId,
+        message.createdTime,
+        incoming,
+        message.id,
+      )
+    }
   }
 
   private upsertSessionForMessage(
@@ -652,6 +718,7 @@ class DatabaseManager {
     incoming: boolean,
     lastMessageId: string | null = null,
   ) {
+    const now = Date.now()
     database.prepare(`
       INSERT INTO session (
         chat_key, chat_type, target_id, last_message_id, unread_count,
@@ -659,22 +726,27 @@ class DatabaseManager {
       ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
       ON CONFLICT(chat_key) DO UPDATE SET
         target_id=excluded.target_id,
-        last_message_id=COALESCE(excluded.last_message_id, session.last_message_id),
+        last_message_id=CASE
+          WHEN excluded.last_active_time >= session.last_active_time
+          THEN COALESCE(excluded.last_message_id, session.last_message_id)
+          ELSE session.last_message_id
+        END,
         unread_count=session.unread_count + ?,
         last_active_time=MAX(session.last_active_time, excluded.last_active_time),
         updated_time=excluded.updated_time
-    `).run(chatKey, chatType, targetId, lastMessageId, incoming ? 1 : 0, time, time, Date.now(), incoming ? 1 : 0)
+    `).run(chatKey, chatType, targetId, lastMessageId, incoming ? 1 : 0, time, now, now, incoming ? 1 : 0)
   }
 
   private loadConversation(chatKey: string): Conversation | null {
     const row = this.requireDatabase().prepare(`
       SELECT s.*, u.nickname AS user_name, u.avatar_url AS user_avatar,
              g.name AS group_name, g.avatar_url AS group_avatar,
-             m.content AS last_content, m.message_type AS last_type
+             m.content AS last_content, m.message_type AS last_type, m.status AS last_status
       FROM session s
       LEFT JOIN user u ON s.chat_type = 0 AND u.id = s.target_id
       LEFT JOIN \`group\` g ON s.chat_type = 1 AND g.id = s.target_id
       LEFT JOIN message m ON m.id = s.last_message_id
+        OR (m.id IS NULL AND m.client_message_id = s.last_message_id)
       WHERE s.chat_key = ?
     `).get(chatKey) as Record<string, unknown> | undefined
     if (!row) return null
@@ -685,11 +757,13 @@ class DatabaseManager {
       type: isGroup ? 'group' : 'direct',
       name,
       avatar: (isGroup ? row.group_avatar : row.user_avatar) as string | null,
-      preview: this.preview(Number(row.last_type), row.last_content as string | null),
+      preview: this.preview(Number(row.last_type), row.last_content as string | null, Number(row.last_status)),
       time: this.formatConversationTime(Number(row.last_active_time)),
       unread: Number(row.unread_count),
       targetId: String(row.target_id),
       pinned: Number(row.is_top) === 1,
+      lastActiveTime: Number(row.last_active_time),
+      createdTime: Number(row.created_time),
     }
   }
 
@@ -775,7 +849,8 @@ class DatabaseManager {
       : `P:${secondId}:${firstId}`
   }
 
-  private preview(messageType: number, content: string | null) {
+  private preview(messageType: number, content: string | null, status = 0) {
+    if (status === 1) return '[消息已撤回]'
     if (!Number.isFinite(messageType)) return ''
     if (messageType === 0) return content ?? ''
     if (messageType === 1) return '[文件]'

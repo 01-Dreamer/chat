@@ -50,8 +50,8 @@ class AuthService {
   }
 
   async register(nickname: string, username: string, password: string) {
-    const session = await apiClient.post<AuthSession>('/auth/register', { nickname, username, password })
-    return this.acceptSession(session)
+    const user = await apiClient.post<ServerUserProfile>('/auth/register', { nickname, username, password })
+    return toClientUser(user)
   }
 
   async refreshCurrentUser() {
@@ -83,6 +83,11 @@ class AuthService {
   getCurrentUserId() {
     if (!this.currentUser) throw new Error('当前没有已登录用户')
     return this.currentUser.id
+  }
+
+  getCurrentUser() {
+    if (!this.currentUser) throw new Error('当前没有已登录用户')
+    return structuredClone(this.currentUser)
   }
 
   hasActiveSession() {
