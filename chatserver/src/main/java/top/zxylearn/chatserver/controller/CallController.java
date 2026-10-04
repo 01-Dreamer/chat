@@ -39,4 +39,14 @@ public class CallController {
 
     @GetMapping("/ice-servers")
     public ApiResponse<Map<String, Object>> iceServers() { return ApiResponse.success(service.iceServers()); }
+
+    @GetMapping("/pending")
+    public ApiResponse<CallRecordResponse> pendingIncoming() {
+        return ApiResponse.success(service.pendingIncoming(StpUtil.getLoginIdAsLong()));
+    }
+
+    @GetMapping("/{callId}")
+    public ApiResponse<CallRecordResponse> get(@PathVariable long callId) {
+        return ApiResponse.success(service.get(StpUtil.getLoginIdAsLong(), callId));
+    }
 }

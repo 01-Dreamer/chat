@@ -1,5 +1,5 @@
 import type { AppNotification } from '../types'
-import { apiClient } from './apiClient'
+import { apiClient, isOfflineError } from './apiClient'
 import { databaseManager } from '../database/databaseManager'
 
 interface ServerNotification {
@@ -15,7 +15,7 @@ function mapNotification(item: ServerNotification): AppNotification {
   const types: AppNotification['type'][] = ['friend_request', 'group_joined', 'red_packet', 'system']
   return {
     id: item.id,
-    type: item.notificationType === 3 && (item.title ?? '').includes('转账') ? 'transfer' : types[item.notificationType] ?? 'system',
+    type: types[item.notificationType] ?? 'system',
     title: item.title ?? '通知',
     content: item.content ?? '',
     time: new Date(item.createdTime).toLocaleString('zh-CN', { hour12: false }),
@@ -28,10 +28,10 @@ class NotificationService {
     try {
       const items = (await apiClient.get<ServerNotification[]>('/notifications?limit=100')).map(mapNotification)
       databaseManager.replaceNotifications(items)
-      return items
+      return databaseManager.loadCachedNotifications()
     } catch (error) {
+      if (!isOfflineError(error)) throw error
       const cached = databaseManager.loadCachedNotifications()
-      if (!cached.length) throw error
       return cached
     }
   }
@@ -39,7 +39,7 @@ class NotificationService {
     const item = mapNotification(await apiClient.patch<ServerNotification>(`/notifications/${id}/read`))
     const cached = databaseManager.loadCachedNotifications().map((value) => value.id === id ? item : value)
     databaseManager.replaceNotifications(cached)
-    return item
+    return databaseManager.loadCachedNotifications().find((value) => value.id === id) ?? item
   }
 }
 

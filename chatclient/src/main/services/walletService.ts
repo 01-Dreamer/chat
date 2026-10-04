@@ -1,5 +1,4 @@
-import { randomUUID } from 'node:crypto'
-import type { RedPacket, TransferResult, WalletAccount } from '../types'
+import type { RedPacket, WalletAccount } from '../types'
 import { apiClient } from './apiClient'
 
 class WalletService {
@@ -9,12 +8,6 @@ class WalletService {
 
   setPayPassword(oldPassword: string, newPassword: string) {
     return apiClient.patch<WalletAccount>('/wallet/pay-password', { oldPassword: oldPassword || null, newPassword })
-  }
-
-  transfer(recipientUserId: string, amount: string, payPassword: string) {
-    return apiClient.post<TransferResult>('/wallet/transfers', {
-      clientTransactionId: randomUUID(), recipientUserId, amount, payPassword,
-    })
   }
 
   createRedPacket(input: {

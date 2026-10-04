@@ -41,6 +41,7 @@ public class FriendRelationshipService {
     private final FriendDeleteRecordMapper deleteRecordMapper;
     private final ReliableEventService reliableEventService;
     private final ChatAccessCache chatAccessCache;
+    private final DirectorySnapshotCache directoryCache;
 
     public FriendRelationshipService(
             UserService userService,
@@ -49,7 +50,8 @@ public class FriendRelationshipService {
             FriendAddRequestMapper requestMapper,
             FriendDeleteRecordMapper deleteRecordMapper,
             ReliableEventService reliableEventService,
-            ChatAccessCache chatAccessCache) {
+            ChatAccessCache chatAccessCache,
+            DirectorySnapshotCache directoryCache) {
         this.userService = userService;
         this.userMapper = userMapper;
         this.friendMapper = friendMapper;
@@ -57,6 +59,7 @@ public class FriendRelationshipService {
         this.deleteRecordMapper = deleteRecordMapper;
         this.reliableEventService = reliableEventService;
         this.chatAccessCache = chatAccessCache;
+        this.directoryCache = directoryCache;
     }
 
     public List<FriendResponse> listFriends() {
@@ -137,6 +140,9 @@ public class FriendRelationshipService {
         request.setCreatedTime(now);
         request.setUpdatedTime(now);
         requestMapper.insert(request);
+        directoryCache.evict(
+                directoryCache.friendRequestsKey(currentUserId),
+                directoryCache.friendRequestsKey(receiver.getId()));
         reliableEventService.append(EVENT_FRIEND_REQUEST, request.getId(), List.of(receiver.getId()), now);
         return FriendRequestResponse.from(request, receiver, currentUserId);
     }
@@ -159,6 +165,7 @@ public class FriendRelationshipService {
         relation.setRemark(trimToNull(remark));
         relation.setUpdatedTime(now);
         friendMapper.updateById(relation);
+        directoryCache.evict(directoryCache.friendsKey(currentUserId));
         User friendUser = userMapper.selectById(friendUserId);
         return FriendResponse.from(relation, friendUser);
     }
@@ -181,6 +188,10 @@ public class FriendRelationshipService {
         record.setUpdatedTime(now);
         deleteRecordMapper.insert(record);
         chatAccessCache.evictDirect(currentUserId, friendUserId);
+        directoryCache.evict(
+                directoryCache.friendsKey(currentUserId),
+                directoryCache.friendsKey(friendUserId));
+        reliableEventService.append(6, record.getId(), List.of(currentUserId, friendUserId), now);
     }
 
     private FriendRequestResponse handleRequest(long requestId, int resultStatus) {
@@ -204,6 +215,11 @@ public class FriendRelationshipService {
             createFriendRelationIfMissing(request.getReceiverId(), request.getSenderId(), now);
             chatAccessCache.evictDirect(request.getSenderId(), request.getReceiverId());
         }
+        directoryCache.evict(
+                directoryCache.friendRequestsKey(request.getSenderId()),
+                directoryCache.friendRequestsKey(request.getReceiverId()),
+                directoryCache.friendsKey(request.getSenderId()),
+                directoryCache.friendsKey(request.getReceiverId()));
         reliableEventService.append(
                 EVENT_FRIEND_REQUEST_HANDLED,
                 request.getId(),

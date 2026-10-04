@@ -1,6 +1,6 @@
-import type { Friend, FriendRequest } from '../types'
+import type { Friend, FriendRequest, VersionedSync } from '../types'
 import { databaseManager } from '../database/databaseManager'
-import { apiClient } from './apiClient'
+import { apiClient, isOfflineError } from './apiClient'
 import { avatarCacheService } from './avatarCacheService'
 
 interface ServerUserSummary {
@@ -70,32 +70,40 @@ function toRequest(item: ServerFriendRequest): FriendRequest {
     receiverId: item.receiverId,
     createdTime: item.createdTime,
     updatedTime: item.updatedTime,
+    userUpdatedTime: item.user.updatedTime,
   }
 }
 
 class FriendService {
   async loadAndSync() {
     try {
-      const [friends, requests] = await Promise.all([this.listFriends(), this.listRequests()])
-      databaseManager.syncFriendData(friends, requests)
-      avatarCacheService.cacheFriends(friends)
+      const [friends, requests] = await Promise.all([
+        this.syncFriends(),
+        this.syncRequests(),
+      ])
       return { friends, requests }
     } catch (error) {
+      if (!isOfflineError(error)) throw error
       const friends = databaseManager.loadCachedFriends()
       const requests = databaseManager.loadCachedFriendRequests()
-      if (!friends.length && !requests.length) throw error
       return { friends, requests }
     }
   }
 
   async listFriends() {
-    const items = await apiClient.get<ServerFriend[]>('/friends')
-    return items.map(toFriend)
+    try { return await this.syncFriends() }
+    catch (error) {
+      if (!isOfflineError(error)) throw error
+      return databaseManager.loadCachedFriends()
+    }
   }
 
   async listRequests() {
-    const items = await apiClient.get<ServerFriendRequest[]>('/friend-requests')
-    return items.map(toRequest)
+    try { return await this.syncRequests() }
+    catch (error) {
+      if (!isOfflineError(error)) throw error
+      return databaseManager.loadCachedFriendRequests()
+    }
   }
 
   async search(username: string) {
@@ -105,35 +113,53 @@ class FriendService {
   async apply(username: string, reason: string) {
     const request = await apiClient.post<ServerFriendRequest>('/friend-requests', { username, message: reason })
     const mapped = toRequest(request)
-    const currentRequests = await this.listRequests()
-    databaseManager.syncFriendRequests(currentRequests)
-    return mapped
+    const requests = await this.syncRequests()
+    return requests.find((item) => item.id === mapped.id) ?? mapped
   }
 
   async accept(requestId: string) {
     const request = await apiClient.post<ServerFriendRequest>(`/friend-requests/${requestId}/accept`)
-    await this.loadAndSync()
-    return toRequest(request)
+    const data = await this.loadAndSync()
+    return data.requests.find((item) => item.id === requestId) ?? toRequest(request)
   }
 
   async reject(requestId: string) {
     const request = await apiClient.post<ServerFriendRequest>(`/friend-requests/${requestId}/reject`)
-    const currentRequests = await this.listRequests()
-    databaseManager.syncFriendRequests(currentRequests)
-    return toRequest(request)
+    const requests = await this.syncRequests()
+    return requests.find((item) => item.id === requestId) ?? toRequest(request)
   }
 
   async updateRemark(friendUserId: string, remark: string) {
     const friend = toFriend(await apiClient.patch<ServerFriend>(`/friends/${friendUserId}/remark`, { remark }))
-    const friends = await this.listFriends()
-    databaseManager.syncFriends(friends)
-    return friend
+    const friends = await this.syncFriends()
+    return friends.find((item) => item.id === friendUserId) ?? friend
   }
 
   async delete(friendUserId: string) {
     await apiClient.delete<null>(`/friends/${friendUserId}`)
-    const friends = await this.listFriends()
-    databaseManager.syncFriends(friends)
+    await this.syncFriends()
+  }
+
+  private async syncFriends() {
+    const version = databaseManager.getDirectoryVersion('friends')
+    const result = await apiClient.get<VersionedSync<ServerFriend>>(
+      `/sync/friends?version=${encodeURIComponent(version)}`,
+    )
+    if (result.changed) {
+      const friends = result.items.map(toFriend)
+      databaseManager.syncFriends(friends, result.version)
+      avatarCacheService.cacheFriends(friends)
+    }
+    return databaseManager.loadCachedFriends()
+  }
+
+  private async syncRequests() {
+    const version = databaseManager.getDirectoryVersion('friend-requests')
+    const result = await apiClient.get<VersionedSync<ServerFriendRequest>>(
+      `/sync/friend-requests?version=${encodeURIComponent(version)}`,
+    )
+    if (result.changed) databaseManager.syncFriendRequests(result.items.map(toRequest), result.version)
+    return databaseManager.loadCachedFriendRequests()
   }
 }
 

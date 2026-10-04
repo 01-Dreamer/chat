@@ -64,6 +64,7 @@ public class GroupManagementService {
     private final FileResourceMapper fileResourceMapper;
     private final FileResourceAccessMapper fileResourceAccessMapper;
     private final ChatAccessCache chatAccessCache;
+    private final DirectorySnapshotCache directoryCache;
 
     public GroupManagementService(
             GroupMapper groupMapper,
@@ -76,7 +77,8 @@ public class GroupManagementService {
             FileResourceMapper fileResourceMapper,
             FileResourceAccessMapper fileResourceAccessMapper,
             ReliableEventService reliableEventService,
-            ChatAccessCache chatAccessCache) {
+            ChatAccessCache chatAccessCache,
+            DirectorySnapshotCache directoryCache) {
         this.groupMapper = groupMapper;
         this.memberMapper = memberMapper;
         this.requestMapper = requestMapper;
@@ -88,6 +90,7 @@ public class GroupManagementService {
         this.fileResourceAccessMapper = fileResourceAccessMapper;
         this.reliableEventService = reliableEventService;
         this.chatAccessCache = chatAccessCache;
+        this.directoryCache = directoryCache;
     }
 
     @Transactional
@@ -112,6 +115,8 @@ public class GroupManagementService {
             insertMember(group.getId(), memberId, ROLE_MEMBER, now);
         }
         chatAccessCache.evictGroup(group.getId());
+        evictGroupData(group.getId(), withOwner(currentUserId, initialMemberIds));
+        reliableEventService.append(6, group.getId(), withOwner(currentUserId, initialMemberIds), now);
         return response(group, owner, null);
     }
 
@@ -179,8 +184,11 @@ public class GroupManagementService {
             }
             group.setName(normalized);
         }
-        group.setUpdatedTime(LocalDateTime.now());
+        LocalDateTime now = LocalDateTime.now();
+        group.setUpdatedTime(now);
         groupMapper.updateById(group);
+        evictGroupData(groupId, List.of());
+        reliableEventService.append(6, groupId, groupUserIds(groupId), now);
         return response(group, actor, findSetting(currentUserId, groupId));
     }
 
@@ -201,8 +209,11 @@ public class GroupManagementService {
             throw new BusinessException("INVALID_GROUP_AVATAR_RESOURCE", "群头像必须使用当前用户上传的图片资源", HttpStatus.BAD_REQUEST);
         }
         group.setAvatarUrl(resource.getFileUrl());
-        group.setUpdatedTime(LocalDateTime.now());
+        LocalDateTime now = LocalDateTime.now();
+        group.setUpdatedTime(now);
         groupMapper.updateById(group);
+        evictGroupData(groupId, List.of());
+        reliableEventService.append(6, groupId, groupUserIds(groupId), now);
         return response(group, actor, findSetting(currentUserId, groupId));
     }
 
@@ -212,9 +223,14 @@ public class GroupManagementService {
         requireActiveGroupForUpdate(groupId);
         GroupMember member = memberMapper.selectForUpdate(groupId, currentUserId);
         if (member == null) throw notMember();
+        LocalDateTime now = LocalDateTime.now();
         member.setNickname(trimToNull(nickname));
-        member.setUpdatedTime(LocalDateTime.now());
+        member.setUpdatedTime(now);
         memberMapper.updateById(member);
+        directoryCache.evict(
+                directoryCache.groupMembersKey(groupId),
+                directoryCache.groupsKey(currentUserId));
+        reliableEventService.append(6, groupId, groupUserIds(groupId), now);
         return GroupMemberResponse.from(member, userMapper.selectById(currentUserId));
     }
 
@@ -234,6 +250,7 @@ public class GroupManagementService {
         setting.setRemark(trimToNull(remark));
         setting.setUpdatedTime(now);
         if (setting.getId() == null) settingMapper.insert(setting); else settingMapper.updateById(setting);
+        directoryCache.evict(directoryCache.groupsKey(currentUserId));
         return response(group, member, setting);
     }
 
@@ -250,9 +267,13 @@ public class GroupManagementService {
         if (target.getRole() == ROLE_OWNER) {
             throw new BusinessException("GROUP_OWNER_ROLE_IMMUTABLE", "不能修改群主角色", HttpStatus.CONFLICT);
         }
+        LocalDateTime now = LocalDateTime.now();
         target.setRole(role);
-        target.setUpdatedTime(LocalDateTime.now());
+        target.setUpdatedTime(now);
         memberMapper.updateById(target);
+        evictGroupData(groupId, List.of(memberUserId));
+        directoryCache.evict(directoryCache.groupRequestsKey(memberUserId));
+        reliableEventService.append(6, groupId, groupUserIds(groupId), now);
         return GroupMemberResponse.from(target, userMapper.selectById(memberUserId));
     }
 
@@ -279,6 +300,7 @@ public class GroupManagementService {
         request.setUpdatedTime(now);
         requestMapper.insert(request);
         List<Long> managers = managerIds(groupId);
+        evictGroupRequestData(groupId, withOwner(currentUserId, new LinkedHashSet<>(managers)));
         reliableEventService.append(EVENT_GROUP_JOIN_REQUEST, request.getId(), managers, now);
         return GroupJoinRequestResponse.from(request, group, userMapper.selectById(currentUserId));
     }
@@ -320,11 +342,16 @@ public class GroupManagementService {
             insertMember(request.getGroupId(), request.getUserId(), ROLE_MEMBER, now);
             chatAccessCache.evictGroup(request.getGroupId());
         }
+        evictGroupRequestData(request.getGroupId(), List.of(request.getUserId(), currentUserId));
+        if (accept) evictGroupData(request.getGroupId(), List.of(request.getUserId()));
         reliableEventService.append(
                 EVENT_GROUP_JOIN_REQUEST_HANDLED,
                 request.getId(),
                 List.of(request.getUserId(), currentUserId),
                 now);
+        if (accept) {
+            reliableEventService.append(6, request.getGroupId(), groupUserIds(request.getGroupId()), now);
+        }
         return GroupJoinRequestResponse.from(request, group, userMapper.selectById(request.getUserId()));
     }
 
@@ -339,6 +366,11 @@ public class GroupManagementService {
         }
         removeMember(member, currentUserId, currentUserId, LocalDateTime.now());
         chatAccessCache.evictGroup(groupId);
+        evictGroupData(groupId, List.of(currentUserId));
+        directoryCache.evict(directoryCache.groupRequestsKey(currentUserId));
+        List<Long> recipients = new ArrayList<>(groupUserIds(groupId));
+        recipients.add(currentUserId);
+        reliableEventService.append(6, groupId, recipients, LocalDateTime.now());
     }
 
     @Transactional
@@ -357,6 +389,11 @@ public class GroupManagementService {
         }
         removeMember(target, memberUserId, currentUserId, LocalDateTime.now());
         chatAccessCache.evictGroup(groupId);
+        evictGroupData(groupId, List.of(memberUserId));
+        directoryCache.evict(directoryCache.groupRequestsKey(memberUserId));
+        List<Long> recipients = new ArrayList<>(groupUserIds(groupId));
+        recipients.add(memberUserId);
+        reliableEventService.append(6, groupId, recipients, LocalDateTime.now());
     }
 
     @Transactional
@@ -379,6 +416,9 @@ public class GroupManagementService {
         memberMapper.delete(new LambdaQueryWrapper<GroupMember>().eq(GroupMember::getGroupId, groupId));
         settingMapper.delete(new LambdaQueryWrapper<UserGroupSetting>().eq(UserGroupSetting::getGroupId, groupId));
         chatAccessCache.evictGroup(groupId);
+        evictGroupData(groupId, members.stream().map(GroupMember::getUserId).toList());
+        reliableEventService.append(
+                6, groupId, members.stream().map(GroupMember::getUserId).toList(), now);
     }
 
     private List<GroupJoinRequestResponse> mapJoinRequests(List<GroupJoinRequest> requests) {
@@ -427,6 +467,34 @@ public class GroupManagementService {
             throw new BusinessException("GROUP_HAS_NO_MANAGER", "群聊没有可处理申请的管理员", HttpStatus.CONFLICT);
         }
         return result;
+    }
+
+    private void evictGroupData(long groupId, Collection<Long> extraUserIds) {
+        Set<Long> userIds = memberMapper.selectList(new LambdaQueryWrapper<GroupMember>()
+                        .eq(GroupMember::getGroupId, groupId))
+                .stream().map(GroupMember::getUserId).collect(Collectors.toSet());
+        userIds.addAll(extraUserIds);
+        List<String> keys = new ArrayList<>();
+        keys.add(directoryCache.groupMembersKey(groupId));
+        for (Long userId : userIds) keys.add(directoryCache.groupsKey(userId));
+        directoryCache.evict(keys.toArray(String[]::new));
+    }
+
+    private List<Long> groupUserIds(long groupId) {
+        return memberMapper.selectList(new LambdaQueryWrapper<GroupMember>()
+                        .eq(GroupMember::getGroupId, groupId))
+                .stream().map(GroupMember::getUserId).toList();
+    }
+
+    private void evictGroupRequestData(long groupId, Collection<Long> extraUserIds) {
+        Set<Long> userIds = memberMapper.selectList(new LambdaQueryWrapper<GroupMember>()
+                        .eq(GroupMember::getGroupId, groupId)
+                        .in(GroupMember::getRole, ROLE_ADMIN, ROLE_OWNER))
+                .stream().map(GroupMember::getUserId).collect(Collectors.toSet());
+        userIds.addAll(extraUserIds);
+        directoryCache.evict(userIds.stream()
+                .map(directoryCache::groupRequestsKey)
+                .toArray(String[]::new));
     }
 
     private GroupMember insertMember(long groupId, long userId, int role, LocalDateTime now) {

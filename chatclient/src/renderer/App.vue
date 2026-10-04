@@ -17,10 +17,11 @@ const callStore = useCallStore()
 const loading = ref(true)
 let removeRealtimeListener: (() => void) | undefined
 let forcedLogoutPromptVisible = false
+let refreshAfterReconnect = false
 const loadingConversationIds = new Set<string>()
 
 interface RealtimeEvent {
-  type: 'MESSAGE_UPSERT' | 'MESSAGE_FAILED' | 'CONTACTS_CHANGED' | 'CONNECTION_CHANGED' | 'CALL_EVENT' | 'FORCED_LOGOUT'
+  type: 'MESSAGE_UPSERT' | 'MESSAGE_QUEUED' | 'MESSAGE_REJECTED' | 'MESSAGE_FAILED' | 'CONTACTS_CHANGED' | 'CONNECTION_CHANGED' | 'CALL_EVENT' | 'FORCED_LOGOUT'
   message?: import('./types').Message
   conversation?: import('./types').Conversation | null
   localEcho?: boolean
@@ -29,6 +30,8 @@ interface RealtimeEvent {
   eventType?: string
   data?: unknown
   reason?: string
+  senderId?: string
+  connected?: boolean
 }
 
 async function handleRealtimeEvent(value: unknown) {
@@ -53,6 +56,10 @@ async function handleRealtimeEvent(value: unknown) {
     if (isCurrentConversation) {
       chatStore.selectConversation(event.message.conversationId)
     }
+  } else if (event.type === 'MESSAGE_QUEUED' && event.clientMessageId) {
+    chatStore.markMessageQueued(event.clientMessageId)
+  } else if (event.type === 'MESSAGE_REJECTED' && event.senderId && event.clientMessageId) {
+    chatStore.removePreviewMessage(event.senderId, event.clientMessageId)
   } else if (event.type === 'MESSAGE_FAILED' && event.clientMessageId) {
     chatStore.markMessageFailed(event.clientMessageId)
     ElMessage.error(event.error || '消息发送失败')
@@ -60,8 +67,25 @@ async function handleRealtimeEvent(value: unknown) {
     try {
       const data = await window.chatApi.refreshContacts()
       contactsStore.setData(data.friends, data.friendRequests, data.groups)
+      chatStore.replaceConversations(data.conversations)
+      chatStore.applyFriendProfiles(data.friends)
+      const current = chatStore.currentConversation
+      if (current?.type === 'group') {
+        try {
+          const members = await window.chatApi.listGroupMembers(current.targetId)
+          chatStore.applyGroupMemberProfiles(current.targetId, members)
+        } catch {
+          // The group may have been dissolved or the current user removed.
+        }
+      }
     } catch {
       // A later reconnect will retry reliable inbox synchronization.
+    }
+  } else if (event.type === 'CONNECTION_CHANGED') {
+    if (!event.connected) refreshAfterReconnect = true
+    else if (refreshAfterReconnect) {
+      refreshAfterReconnect = false
+      void loadWorkspace(true)
     }
   } else if (event.type === 'CALL_EVENT' && event.eventType) callStore.receive(event.eventType, event.data)
   else if (event.type === 'FORCED_LOGOUT' && !forcedLogoutPromptVisible) {
@@ -95,8 +119,8 @@ async function hydrateConversationMessages(conversationId: string) {
   if (!conversationId || chatStore.hasLoadedMessages(conversationId) || loadingConversationIds.has(conversationId)) return
   loadingConversationIds.add(conversationId)
   try {
-    const messages = await window.chatApi.loadConversationMessages(conversationId)
-    chatStore.setConversationMessages(conversationId, messages)
+    const page = await window.chatApi.loadConversationMessages(conversationId)
+    chatStore.setConversationMessagePage(conversationId, page)
   } catch {
     // Realtime messages remain usable; selecting the session again retries SQLite loading.
   } finally {
@@ -111,6 +135,13 @@ async function loadWorkspace(silent = false) {
     chatStore.replaceConversations(data.conversations)
     await persistVisibleSessionRead()
     contactsStore.setData(data.friends, data.friendRequests, data.groups)
+    chatStore.applyFriendProfiles(data.friends)
+    const current = chatStore.currentConversation
+    if (current?.type === 'group') {
+      void window.chatApi.listGroupMembers(current.targetId).then((members) => {
+        chatStore.applyGroupMemberProfiles(current.targetId, members)
+      }).catch(() => undefined)
+    }
     notificationsStore.setData(data.notifications)
     return true
   } catch (error) {

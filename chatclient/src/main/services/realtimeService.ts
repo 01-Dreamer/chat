@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { clientConfig } from '../config'
 import type { Conversation, Message, ServerMessage } from '../types'
 import { databaseManager } from '../database/databaseManager'
 import { apiClient } from './apiClient'
@@ -28,17 +29,13 @@ interface InboxBatch {
 
 export type RealtimeRendererEvent =
   | { type: 'MESSAGE_UPSERT', message: Message, conversation: Conversation | null, localEcho: boolean }
+  | { type: 'MESSAGE_QUEUED', clientMessageId: string }
+  | { type: 'MESSAGE_REJECTED', senderId: string, clientMessageId: string }
   | { type: 'MESSAGE_FAILED', clientMessageId: string, error: string }
   | { type: 'CONTACTS_CHANGED' }
   | { type: 'CONNECTION_CHANGED', connected: boolean }
   | { type: 'FORCED_LOGOUT', reason: string }
   | { type: 'CALL_EVENT', eventType: string, data: unknown }
-
-function normalizeWsUrl(value: string | undefined) {
-  const configured = value?.trim()
-  if (!configured) throw new Error('缺少 WS_URL 环境配置')
-  return configured.replace(/\/+$/, '')
-}
 
 class RealtimeService {
   private socket: WebSocket | null = null
@@ -69,7 +66,7 @@ class RealtimeService {
     if (this.socket?.readyState === WebSocket.OPEN || this.socket?.readyState === WebSocket.CONNECTING) return
     const token = apiClient.getToken()
     if (!token) return
-    const url = new URL(normalizeWsUrl(process.env.WS_URL))
+    const url = new URL(clientConfig.wsUrl)
     url.searchParams.set(token.tokenName, token.tokenValue)
     url.searchParams.set('deviceId', this.deviceId)
     const socket = new WebSocket(url)
@@ -134,11 +131,35 @@ class RealtimeService {
       return
     }
     if (frame.type === 'PONG' || frame.type === 'CONNECTED') return
+    if (frame.type === 'DIRECTORY_CHANGED') {
+      void this.syncInbox()
+      return
+    }
     if (frame.type === 'FORCED_LOGOUT') {
       const data = frame.data && typeof frame.data === 'object' ? frame.data as { message?: unknown } : null
       const message = typeof data?.message === 'string' ? data.message : '你的账号已在另一台设备登录'
       this.disconnect()
       this.sink({ type: 'FORCED_LOGOUT', reason: message })
+      return
+    }
+    if (frame.type === 'MESSAGE_QUEUED' && frame.clientMessageId) {
+      databaseManager.markMessageQueued(frame.clientMessageId)
+      this.sink({ type: 'MESSAGE_QUEUED', clientMessageId: frame.clientMessageId })
+      return
+    }
+    if (frame.type === 'MESSAGE_PREVIEW' && this.isServerMessage(frame.data)) {
+      const message = databaseManager.applyPreviewMessage(frame.data)
+      const conversation = databaseManager.getConversation(message.conversationId)
+      this.sink({ type: 'MESSAGE_UPSERT', message, conversation, localEcho: false })
+      void this.hydrateMessageResource(frame.data, epoch, userId, true)
+      return
+    }
+    if (frame.type === 'MESSAGE_REJECTED' && frame.data && typeof frame.data === 'object') {
+      const data = frame.data as { senderId?: unknown, clientMessageId?: unknown }
+      if (typeof data.senderId === 'string' && typeof data.clientMessageId === 'string') {
+        databaseManager.removePreviewMessage(data.senderId, data.clientMessageId)
+        this.sink({ type: 'MESSAGE_REJECTED', senderId: data.senderId, clientMessageId: data.clientMessageId })
+      }
       return
     }
     if ((frame.type === 'MESSAGE' || frame.type === 'MESSAGE_ACK' || frame.type === 'MESSAGE_RECALLED') && this.isServerMessage(frame.data)) {
@@ -207,7 +228,7 @@ class RealtimeService {
             void this.hydrateMessageResource(item.data, epoch, userId)
           } else {
             databaseManager.advanceLastSequence(item.sequence)
-            if (item.eventType >= 2 && item.eventType <= 5) contactsChanged = true
+            if (item.eventType >= 2 && item.eventType <= 6) contactsChanged = true
           }
         }
         if (contactsChanged) this.sink({ type: 'CONTACTS_CHANGED' })
@@ -379,10 +400,12 @@ class RealtimeService {
     }
   }
 
-  private async hydrateMessageResource(message: ServerMessage, epoch: number, userId: string) {
+  private async hydrateMessageResource(message: ServerMessage, epoch: number, userId: string, preview = false) {
     if (!await this.prepareMessageResource(message)) return
     if (!this.isCurrentSession(epoch, userId)) return
-    const hydrated = databaseManager.applyRealtimeMessage(message)
+    const hydrated = preview
+      ? databaseManager.applyPreviewMessage(message)
+      : databaseManager.applyRealtimeMessage(message)
     const conversation = databaseManager.getConversation(hydrated.conversationId)
     // This is only a metadata refresh for an already persisted message. It
     // must not affect unread counts in either SQLite or the renderer.

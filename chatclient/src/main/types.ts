@@ -18,6 +18,12 @@ export interface IpcResult<T> {
   error?: string
 }
 
+export interface VersionedSync<T> {
+  version: string
+  changed: boolean
+  items: T[]
+}
+
 export interface ProfilePatch {
   nickname?: string
   avatar?: string | null
@@ -55,6 +61,7 @@ export interface FriendRequest {
   receiverId?: string
   createdTime?: number
   updatedTime?: number
+  userUpdatedTime?: number
 }
 
 export interface GroupChat {
@@ -85,6 +92,7 @@ export interface GroupMember {
   avatar: string | null
   createdTime: number
   updatedTime: number
+  userUpdatedTime: number
 }
 
 export interface GroupActionResult {
@@ -116,7 +124,7 @@ export interface Message {
   status?: number
   recallOperatorId?: string | null
   recallOperatorName?: string | null
-  sendStatus?: 'sending' | 'success' | 'failed'
+  sendStatus?: 'sending' | 'queued' | 'success' | 'failed'
 }
 
 export interface ServerMessage {
@@ -132,9 +140,17 @@ export interface ServerMessage {
   replyMessageId: string | null
   status: number
   recallOperatorId: string | null
+  recallOperatorName: string | null
   recalledTime: number | null
   createdTime: number
   updatedTime: number
+  senderUsername?: string | null
+  senderName?: string | null
+  senderAvatarUrl?: string | null
+  senderUpdatedTime?: number
+  groupMemberId?: string | null
+  groupMemberNickname?: string | null
+  groupMemberUpdatedTime?: number
 }
 
 export interface FileResource {
@@ -187,18 +203,6 @@ export interface RedPacket {
   updatedTime: number
 }
 
-export interface TransferResult {
-  id: string
-  clientTransactionId: string
-  fromUserId: string
-  toUserId: string
-  transactionType: number
-  amount: string
-  referenceId: string | null
-  status: number
-  createdTime: number
-}
-
 export interface CallRecord {
   id: string
   callerId: string
@@ -226,12 +230,22 @@ export interface Conversation {
   createdTime?: number
 }
 
-export interface OpenConversationResult {
-  conversation: Conversation
-  messages: Message[]
+export interface MessagePageCursor {
+  createdAt: number
+  localId: number
 }
 
-export type NotificationType = 'friend_request' | 'friend_accepted' | 'group_joined' | 'red_packet' | 'transfer' | 'system'
+export interface MessagePage {
+  messages: Message[]
+  nextCursor: MessagePageCursor | null
+  hasMore: boolean
+}
+
+export interface OpenConversationResult extends MessagePage {
+  conversation: Conversation
+}
+
+export type NotificationType = 'friend_request' | 'friend_accepted' | 'group_joined' | 'red_packet' | 'system'
 
 export interface AppNotification {
   id: string

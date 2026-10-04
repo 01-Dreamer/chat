@@ -18,7 +18,8 @@ public record GroupJoinRequestResponse(
         int status,
         String reviewerId,
         long createdTime,
-        long updatedTime) {
+        long updatedTime,
+        long userUpdatedTime) {
 
     public static GroupJoinRequestResponse from(
             GroupJoinRequest request,
@@ -36,6 +37,7 @@ public record GroupJoinRequestResponse(
                 request.getStatus(),
                 request.getReviewerId() == null ? null : request.getReviewerId().toString(),
                 toEpochMilli(request.getCreatedTime()),
-                toEpochMilli(request.getUpdatedTime()));
+                toEpochMilli(request.getUpdatedTime()),
+                toEpochMilli(applicant.getUpdatedTime()));
     }
 }

@@ -39,6 +39,10 @@ CREATE TABLE IF NOT EXISTS \`group\` (
   avatar_url TEXT,
   avatar_local_path TEXT,
   owner_id TEXT NOT NULL,
+  owner_name TEXT NOT NULL DEFAULT '群主',
+  member_count INTEGER NOT NULL DEFAULT 0,
+  current_user_role INTEGER NOT NULL DEFAULT 0,
+  current_user_nickname TEXT,
   status INTEGER NOT NULL DEFAULT 1,
   created_time INTEGER NOT NULL,
   updated_time INTEGER NOT NULL
@@ -110,6 +114,7 @@ CREATE TABLE IF NOT EXISTS message (
   reply_message_id TEXT,
   status INTEGER NOT NULL DEFAULT 0,
   recall_operator_id TEXT,
+  recall_operator_name TEXT,
   recalled_time INTEGER,
   send_status INTEGER NOT NULL DEFAULT 0,
   created_time INTEGER NOT NULL,
@@ -200,6 +205,12 @@ CREATE TABLE IF NOT EXISTS inbox_sync_state (
 );
 INSERT OR IGNORE INTO inbox_sync_state (id, last_sequence, updated_time) VALUES (1, 0, 0);
 
+CREATE TABLE IF NOT EXISTS directory_sync_state (
+  sync_key TEXT PRIMARY KEY NOT NULL,
+  version TEXT NOT NULL,
+  updated_time INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS translation_cache (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   text_hash TEXT NOT NULL,
@@ -233,9 +244,25 @@ function applyMigrations(database: DatabaseSync) {
   if (!columns.some((column) => column.name === 'avatar_local_path')) {
     database.exec('ALTER TABLE `group` ADD COLUMN avatar_local_path TEXT DEFAULT NULL')
   }
+  if (!columns.some((column) => column.name === 'owner_name')) {
+    database.exec("ALTER TABLE `group` ADD COLUMN owner_name TEXT NOT NULL DEFAULT '群主'")
+  }
+  if (!columns.some((column) => column.name === 'member_count')) {
+    database.exec('ALTER TABLE `group` ADD COLUMN member_count INTEGER NOT NULL DEFAULT 0')
+  }
+  if (!columns.some((column) => column.name === 'current_user_role')) {
+    database.exec('ALTER TABLE `group` ADD COLUMN current_user_role INTEGER NOT NULL DEFAULT 0')
+  }
+  if (!columns.some((column) => column.name === 'current_user_nickname')) {
+    database.exec('ALTER TABLE `group` ADD COLUMN current_user_nickname TEXT DEFAULT NULL')
+  }
   const sessionColumns = database.prepare('PRAGMA table_info(session)').all() as Array<{ name: string }>
   if (!sessionColumns.some((column) => column.name === 'last_read_time')) {
     database.exec('ALTER TABLE session ADD COLUMN last_read_time INTEGER NOT NULL DEFAULT 0')
+  }
+  const messageColumns = database.prepare('PRAGMA table_info(message)').all() as Array<{ name: string }>
+  if (!messageColumns.some((column) => column.name === 'recall_operator_name')) {
+    database.exec('ALTER TABLE message ADD COLUMN recall_operator_name TEXT DEFAULT NULL')
   }
   const now = Date.now()
   if (previousVersion < 4) {
@@ -254,5 +281,12 @@ function applyMigrations(database: DatabaseSync) {
   // Recalled content must never survive locally, including rows written by
   // older client versions before content scrubbing was introduced.
   database.exec('UPDATE message SET content = NULL WHERE status = 1;')
-  database.exec('PRAGMA user_version = 4')
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS directory_sync_state (
+      sync_key TEXT PRIMARY KEY NOT NULL,
+      version TEXT NOT NULL,
+      updated_time INTEGER NOT NULL
+    )
+  `)
+  database.exec('PRAGMA user_version = 7')
 }

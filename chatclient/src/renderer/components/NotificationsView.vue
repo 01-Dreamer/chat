@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useNotificationsStore } from '../stores/notifications'
 const notificationsStore = useNotificationsStore()
-const icons: Record<string, string> = { friend_request: '♧', friend_accepted: '✓', group_joined: '⌘', red_packet: '◈', transfer: '↗', system: 'i' }
+const icons: Record<string, string> = { friend_request: '♧', friend_accepted: '✓', group_joined: '⌘', red_packet: '◈', system: 'i' }
 async function markRead(id: string) { await window.chatApi.markNotificationRead(id); notificationsStore.markRead(id) }
 </script>
 
