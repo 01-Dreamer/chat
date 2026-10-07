@@ -2,6 +2,7 @@ import type { ProfilePatch } from '../types'
 import { databaseManager } from '../database/databaseManager'
 import { apiClient } from './apiClient'
 import { authService, toClientUser, type ServerUserProfile } from './authService'
+import { avatarCacheService } from './avatarCacheService'
 
 class ProfileService {
   async update(patch: ProfilePatch) {
@@ -15,6 +16,7 @@ class ProfileService {
     const user = toClientUser(profile)
     authService.updateCurrentUser(user)
     databaseManager.upsertCurrentUser(user)
+    avatarCacheService.cacheCurrentUser(user)
     return databaseManager.loadCachedUser(user.id, user.balance) ?? user
   }
 
@@ -23,6 +25,7 @@ class ProfileService {
     const user = toClientUser(profile)
     authService.updateCurrentUser(user)
     databaseManager.upsertCurrentUser(user)
+    avatarCacheService.cacheCurrentUser(user)
     return databaseManager.loadCachedUser(user.id, user.balance) ?? user
   }
 }

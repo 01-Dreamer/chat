@@ -123,7 +123,9 @@ public class InboxSyncService {
         if (event.getEventType() == 0 || event.getEventType() == 1) {
             Message message = messages.get(event.getReferenceId());
             if (message != null) {
-                User operator = recallOperators.get(message.getRecallOperatorId());
+                User operator = message.getRecallOperatorId() == null
+                        ? null
+                        : recallOperators.get(message.getRecallOperatorId());
                 User sender = userMapper.selectById(message.getSenderId());
                 GroupMember senderMember = message.getChatType() == 1
                         ? groupMemberMapper.selectOne(new LambdaQueryWrapper<GroupMember>()

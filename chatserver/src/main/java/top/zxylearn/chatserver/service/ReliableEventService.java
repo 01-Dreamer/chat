@@ -27,6 +27,8 @@ import java.util.Map;
 @Service
 public class ReliableEventService {
 
+    private static final int EVENT_DIRECTORY_CHANGED = 6;
+
     private final EventMapper eventMapper;
     private final UserInboxMapper inboxMapper;
     private final UserMapper userMapper;
@@ -62,7 +64,18 @@ public class ReliableEventService {
             LocalDateTime now) {
         Event event = new Event();
         event.setEventType(eventType);
-        event.setReferenceId(referenceId);
+        if (eventType == EVENT_DIRECTORY_CHANGED) {
+            // Directory changes are repeatable: the same user or group can be
+            // renamed, re-avatarized or edited many times. The event table's
+            // (event_type, reference_id) unique key is intentionally retained
+            // for message/request idempotency, so use this event's own Snowflake
+            // ID as the unique reference for refresh-only directory events.
+            long eventId = identifierGenerator.nextId(event).longValue();
+            event.setId(eventId);
+            event.setReferenceId(eventId);
+        } else {
+            event.setReferenceId(referenceId);
+        }
         event.setCreatedTime(now);
         event.setUpdatedTime(now);
         eventMapper.insert(event);
@@ -89,7 +102,7 @@ public class ReliableEventService {
             sequences.put(userId, nextSequence);
         }
         inboxMapper.insertBatch(inboxRows);
-        if (eventType >= 2 && eventType <= 6 && !sequences.isEmpty()) {
+        if (eventType >= 2 && eventType <= EVENT_DIRECTORY_CHANGED && !sequences.isEmpty()) {
             Runnable publish = () -> realtimePublisher.publish(RealtimeEvent.businessEvent(
                     "DIRECTORY_CHANGED",
                     sequences,

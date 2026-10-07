@@ -344,7 +344,7 @@ CREATE TABLE `notification` (
 
 CREATE TABLE `event` (
     id BIGINT NOT NULL COMMENT '事件ID',
-    event_type TINYINT NOT NULL COMMENT '事件类型：0-消息发送，1-消息撤回，2-好友申请，3-好友申请处理，4-入群申请，5-入群申请处理',
+    event_type TINYINT NOT NULL COMMENT '事件类型：0-消息发送，1-消息撤回，2-好友申请，3-好友申请处理，4-入群申请，5-入群申请处理，6-通讯录变更',
     reference_id BIGINT NOT NULL COMMENT '关联业务记录ID',
     created_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     updated_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
