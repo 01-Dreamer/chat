@@ -30,15 +30,10 @@ export const useChatStore = defineStore('chat', () => {
     else conversations.value.push(conversation)
     messagesByConversation.value[conversation.id] ??= []
     sortConversations()
-    // On a fresh login the reliable inbox may recreate the session list after
-    // the initial local read. Keep this consistent with setData(): select the
-    // first available session so the watcher persists it as read immediately.
-    if (!currentConversationId.value && conversations.value.length) {
-      currentConversationId.value = conversations.value[0].id
-    }
   }
 
   function setData(items: Conversation[], messages: Record<string, Message[]>) {
+    const selectedId = currentConversationId.value
     const liveConversations = conversations.value
     conversations.value = [...items]
     for (const live of liveConversations) {
@@ -62,7 +57,10 @@ export const useChatStore = defineStore('chat', () => {
     loadedConversationIds.clear()
     messagePages.value = {}
     for (const id of Object.keys(messages)) loadedConversationIds.add(id)
-    currentConversationId.value = conversations.value[0]?.id ?? ''
+    // Loading local data must not implicitly read the first conversation.
+    currentConversationId.value = conversations.value.some((item) => item.id === selectedId)
+      ? selectedId
+      : ''
   }
   function selectConversation(id: string) {
     currentConversationId.value = id
@@ -73,11 +71,11 @@ export const useChatStore = defineStore('chat', () => {
     conversations.value = [...items]
     sortConversations()
     for (const item of items) messagesByConversation.value[item.id] ??= []
-    if (!items.some((item) => item.id === currentConversationId.value)) currentConversationId.value = conversations.value[0]?.id ?? ''
+    if (!items.some((item) => item.id === currentConversationId.value)) currentConversationId.value = ''
   }
   function removeConversation(id: string) {
     conversations.value = conversations.value.filter((item) => item.id !== id)
-    if (currentConversationId.value === id) currentConversationId.value = conversations.value[0]?.id ?? ''
+    if (currentConversationId.value === id) currentConversationId.value = ''
   }
   function appendMessage(message: Message, conversationState?: Conversation | null) {
     if (message.clientMessageId && message.sendStatus === 'sending' && queuedClientMessageIds.has(message.clientMessageId)) {

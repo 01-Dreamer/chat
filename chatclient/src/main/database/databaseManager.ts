@@ -1,6 +1,7 @@
 import { app } from 'electron'
-import { mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { copyFileSync, existsSync, mkdirSync } from 'node:fs'
+import { basename, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import type { AppNotification, Conversation, FileResource, Friend, FriendRequest, GroupChat, GroupMember, Message, MessagePage, MessagePageCursor, RedPacket, ServerMessage, User } from '../types'
 import { initializeDatabase } from './migrations'
@@ -15,10 +16,17 @@ class DatabaseManager {
     if (this.database && this.currentUserId === userId) return
     this.close()
 
-    const databaseDirectory = join(app.getPath('userData'), 'databases', userId)
+    // `databases` is reserved and managed by Chromium. With two Electron
+    // instances sharing userData, Chromium may recreate that directory and
+    // unlink another account's open SQLite database. Keep application data in
+    // a dedicated directory which Chromium never owns.
+    const databaseDirectory = join(app.getPath('userData'), 'chat-data', userId)
     mkdirSync(databaseDirectory, { recursive: true })
-    const database = new DatabaseSync(join(databaseDirectory, 'chat.sqlite'))
+    const databasePath = join(databaseDirectory, 'chat.sqlite')
+    this.migrateLegacyDatabase(userId, databasePath)
+    const database = new DatabaseSync(databasePath)
     initializeDatabase(database)
+    this.migrateLegacyAvatarUrls(database)
     // A process restart loses the in-memory WebSocket acknowledgement tracker.
     // Leave these messages retryable instead of displaying an endless spinner.
     database.prepare('UPDATE message SET send_status = 2 WHERE send_status = 0').run()
@@ -676,6 +684,46 @@ class DatabaseManager {
     return this.database
   }
 
+  private migrateLegacyAvatarUrls(database: DatabaseSync) {
+    for (const table of ['user', '`group`']) {
+      const rows = database.prepare(`
+        SELECT avatar_local_path FROM ${table}
+        WHERE avatar_local_path LIKE 'file://%'
+      `).all() as Array<{ avatar_local_path: string }>
+      const update = database.prepare(`UPDATE ${table} SET avatar_local_path = ? WHERE avatar_local_path = ?`)
+      for (const row of rows) {
+        let nextUrl: string | null = null
+        try {
+          const fileName = basename(fileURLToPath(row.avatar_local_path))
+          if (/^[a-f\d]{64}\.[a-z\d]{1,8}$/i.test(fileName)) {
+            nextUrl = `chat-avatar://cache/${encodeURIComponent(fileName)}`
+          }
+        } catch {
+          // Invalid legacy cache paths fall back to the remote avatar URL.
+        }
+        update.run(nextUrl, row.avatar_local_path)
+      }
+    }
+  }
+
+  private migrateLegacyDatabase(userId: string, targetPath: string) {
+    if (existsSync(targetPath)) return
+    const userData = app.getPath('userData')
+    const candidates = [
+      join(userData, 'databases', userId, 'chat.sqlite'),
+      join(userData, `chat_${userId}.db`),
+    ]
+    const sourcePath = candidates.find((candidate) => existsSync(candidate))
+    if (!sourcePath) return
+    copyFileSync(sourcePath, targetPath)
+    // Copy the WAL so committed pages not checkpointed into the main file are
+    // preserved. SQLite will rebuild the shared-memory file for the new path.
+    const sourceWalPath = `${sourcePath}-wal`
+    if (existsSync(sourceWalPath)) {
+      copyFileSync(sourceWalPath, `${targetPath}-wal`)
+    }
+  }
+
   private replaceFriends(database: DatabaseSync, friends: Friend[]) {
     database.exec('DELETE FROM friend')
     const upsertUser = database.prepare(`
@@ -912,8 +960,10 @@ class DatabaseManager {
 
   private loadConversation(chatKey: string): Conversation | null {
     const row = this.requireDatabase().prepare(`
-      SELECT s.*, u.nickname AS user_name, u.avatar_url AS user_avatar,
-             g.name AS group_name, g.avatar_url AS group_avatar,
+      SELECT s.*, u.nickname AS user_name,
+             COALESCE(u.avatar_local_path, u.avatar_url) AS user_avatar,
+             g.name AS group_name,
+             COALESCE(g.avatar_local_path, g.avatar_url) AS group_avatar,
              m.content AS last_content, m.message_type AS last_type, m.status AS last_status
       FROM session s
       LEFT JOIN user u ON s.chat_type = 0 AND u.id = s.target_id

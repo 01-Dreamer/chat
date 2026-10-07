@@ -2,9 +2,9 @@ import { app } from 'electron'
 import { createHash } from 'node:crypto'
 import { mkdir, stat, writeFile } from 'node:fs/promises'
 import { extname, join } from 'node:path'
-import { pathToFileURL } from 'node:url'
 import type { Friend, GroupChat, GroupMember, User } from '../types'
 import { databaseManager } from '../database/databaseManager'
+import { avatarCacheUrl } from './avatarProtocol'
 
 class AvatarCacheService {
   cacheFriends(items: Friend[]) {
@@ -38,7 +38,7 @@ class AvatarCacheService {
         if (!response.ok) return
         await writeFile(path, Buffer.from(await response.arrayBuffer()))
       }
-      const localUrl = pathToFileURL(path).toString()
+      const localUrl = avatarCacheUrl(`${hash}${extension}`)
       if (kind === 'user') databaseManager.setUserAvatarLocal(id, remoteUrl, localUrl)
       else databaseManager.setGroupAvatarLocal(id, remoteUrl, localUrl)
     } catch {

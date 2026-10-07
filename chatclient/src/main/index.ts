@@ -14,6 +14,7 @@ import { walletService } from './services/walletService'
 import { aiService } from './services/aiService'
 import { callService } from './services/callService'
 import { avatarCacheService } from './services/avatarCacheService'
+import { registerAvatarProtocol } from './services/avatarProtocol'
 
 let mainWindow: BrowserWindow | null = null
 let minimizedBounds: Rectangle | null = null
@@ -314,6 +315,7 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  registerAvatarProtocol()
   await authService.startFreshSession()
   registerIpc()
   createWindow()
