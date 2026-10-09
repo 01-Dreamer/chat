@@ -411,11 +411,11 @@ class DatabaseManager {
     }
   }
 
-  applyRealtimeMessage(message: ServerMessage, forceIncomingDelivery = false) {
+  applyRealtimeMessage(message: ServerMessage) {
     const database = this.requireDatabase()
     database.exec('BEGIN IMMEDIATE')
     try {
-      this.upsertServerMessage(database, message, forceIncomingDelivery)
+      this.upsertServerMessage(database, message)
       database.exec('COMMIT')
     } catch (error) {
       database.exec('ROLLBACK')
@@ -428,7 +428,7 @@ class DatabaseManager {
     const database = this.requireDatabase()
     database.exec('BEGIN IMMEDIATE')
     try {
-      this.upsertServerMessage(database, message, true, true, 3)
+      this.upsertServerMessage(database, message, true, 3)
       database.exec('COMMIT')
     } catch (error) {
       database.exec('ROLLBACK')
@@ -873,7 +873,6 @@ class DatabaseManager {
   private upsertServerMessage(
     database: DatabaseSync,
     message: ServerMessage,
-    forceIncomingDelivery = false,
     countUnread = true,
     sendStatus = 1,
   ) {
@@ -911,13 +910,16 @@ class DatabaseManager {
     const targetId = message.chatType === 0
       ? (message.senderId === this.currentUserId ? message.targetId : message.senderId)
       : message.targetId
-    // Replayed websocket/inbox events must not recreate a session the user
-    // explicitly hid. A genuinely new message is allowed to bring it back.
-    if (sessionState || !existing || forceIncomingDelivery) {
+    // A message can arrive through fast preview, resource hydration, the
+    // durable event and inbox recovery. Only its first insertion is a new
+    // delivery; all later upserts are idempotent metadata/status refreshes.
+    // This also prevents replayed events from recreating a hidden session.
+    if (sessionState || !existing) {
       const incoming = countUnread
+        && !existing
+        && message.senderId !== this.currentUserId
         && message.chatKey !== this.activeChatKey
         && message.createdTime > Number(sessionState?.last_read_time ?? 0)
-        && (forceIncomingDelivery || (!existing && message.senderId !== this.currentUserId))
       this.upsertSessionForMessage(
         database,
         message.chatKey,
@@ -1011,7 +1013,7 @@ class DatabaseManager {
       senderId: message.senderId,
       senderName: user?.nickname ?? '用户',
       senderAvatar: user?.avatar_url ?? null,
-      type: message.messageType === 0 ? 'text' : message.messageType === 1 ? (resource?.resourceType === 2 ? 'voice' : 'file') : message.messageType === 2 ? 'red_packet' : 'text',
+      type: message.messageType === 0 ? 'text' : message.messageType === 1 ? (resource?.resourceType === 2 ? 'voice' : 'file') : message.messageType === 2 ? 'red_packet' : 'call',
       content: message.status === 1 ? '该消息已撤回' : message.content ?? '',
       referenceId: message.referenceId,
       replyMessageId: message.replyMessageId,
@@ -1039,7 +1041,7 @@ class DatabaseManager {
       senderId: String(row.sender_id),
       senderName: String(row.sender_name ?? (String(row.sender_id) === this.currentUserId ? '我' : '用户')),
       senderAvatar: row.sender_avatar as string | null,
-      type: Number(row.message_type) === 0 ? 'text' : Number(row.message_type) === 1 ? (resource?.resourceType === 2 ? 'voice' : 'file') : Number(row.message_type) === 2 ? 'red_packet' : 'text',
+      type: Number(row.message_type) === 0 ? 'text' : Number(row.message_type) === 1 ? (resource?.resourceType === 2 ? 'voice' : 'file') : Number(row.message_type) === 2 ? 'red_packet' : 'call',
       content: Number(row.status) === 1 ? '该消息已撤回' : String(row.content ?? ''),
       referenceId: row.reference_id == null ? null : String(row.reference_id),
       replyMessageId: row.reply_message_id == null ? null : String(row.reply_message_id),

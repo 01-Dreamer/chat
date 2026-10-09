@@ -106,7 +106,8 @@ public class CallManagementService {
         MessagePersistenceService.PersistedMessage prompt = null;
         if (!"accept".equals(action)) {
             String content = switch (action) {
-                case "complete" -> call.getCallType() == 1 ? "视频通话已结束" : "语音通话已结束";
+                case "complete" -> (call.getCallType() == 1 ? "视频通话已结束 " : "语音通话已结束 ")
+                        + formatCallDuration(call.getDuration());
                 case "reject" -> "通话已拒绝";
                 case "missed" -> "未接通话";
                 case "cancel" -> "通话已取消";
@@ -123,6 +124,16 @@ public class CallManagementService {
                     "MESSAGE", finalPrompt.targetSequences(), finalPrompt.message()));
         });
         return response;
+    }
+
+    static String formatCallDuration(Integer duration) {
+        int totalSeconds = Math.max(duration == null ? 0 : duration, 0);
+        int hours = totalSeconds / 3600;
+        int minutes = totalSeconds % 3600 / 60;
+        int seconds = totalSeconds % 60;
+        return hours > 0
+                ? String.format("%02d:%02d:%02d", hours, minutes, seconds)
+                : String.format("%02d:%02d", minutes, seconds);
     }
 
     public void relaySignal(long userId, long callId, long targetUserId, String signalType, Object payload) {

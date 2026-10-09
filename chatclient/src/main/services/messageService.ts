@@ -38,7 +38,15 @@ class MessageService {
       senderId: currentUserId,
       senderName: currentUser.nickname,
       senderAvatar: databaseManager.getDisplayAvatar('user', currentUserId) ?? currentUser.avatar,
-      type: resource?.resourceType === 2 ? 'voice' : messageType === 1 ? 'file' : 'text',
+      type: resource?.resourceType === 2
+        ? 'voice'
+        : messageType === 1
+          ? 'file'
+          : messageType === 2
+            ? 'red_packet'
+            : messageType === 3
+              ? 'call'
+              : 'text',
       content,
       referenceId: resource?.id ?? packet?.id ?? null,
       replyMessageId: replyMessageId ?? null,

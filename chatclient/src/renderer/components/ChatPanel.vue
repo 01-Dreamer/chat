@@ -72,7 +72,7 @@ function isOwnMessage(message: Message) {
 }
 
 function canRecallMessage(message: Message) {
-  if (message.type === 'red_packet' || message.status === 1 || message.id.startsWith('local:')) return false
+  if (message.type === 'red_packet' || message.type === 'call' || message.status === 1 || message.id.startsWith('local:')) return false
   if (isOwnMessage(message)) return recallClock.value - message.createdAt <= SELF_RECALL_WINDOW_MS
   return chatStore.currentConversation?.type === 'group' && currentGroupRole.value >= 1
 }
@@ -93,6 +93,7 @@ function messageSenderDisplayName(message?: Message | null) {
 function quotePreview(message: Message) {
   if (message.status === 1) return '[消息已撤回]'
   if (message.type === 'red_packet') return '[红包]'
+  if (message.type === 'call') return '[通话]'
   if (message.type === 'voice') return '[语音]'
   if (message.type === 'file') {
     if (message.fileKind === 'image') return '[图片]'
@@ -106,6 +107,7 @@ function historyPreview(message: Message) {
   if (message.status === 1) return '该消息已撤回'
   if (message.type === 'voice') return '[语音]'
   if (message.type === 'red_packet') return '[红包]'
+  if (message.type === 'call') return message.content
   if (message.type === 'file') return `[${message.fileKind === 'image' ? '图片' : message.fileKind === 'video' ? '视频' : '文件'}] ${message.fileName ?? ''}`
   return message.content
 }
@@ -274,8 +276,22 @@ async function captureScreen() {
   }
 }
 
-async function handleFileDrop(event: DragEvent) {
+function resetFileDragState() {
   draggingFiles.value = false
+}
+
+function handleFileDragEnter(event: DragEvent) {
+  if (Array.from(event.dataTransfer?.types ?? []).includes('Files')) draggingFiles.value = true
+}
+
+function handleFileDragLeave(event: DragEvent) {
+  const dropZone = event.currentTarget as HTMLElement | null
+  const nextTarget = event.relatedTarget
+  if (!dropZone || !(nextTarget instanceof Node) || !dropZone.contains(nextTarget)) resetFileDragState()
+}
+
+async function handleFileDrop(event: DragEvent) {
+  resetFileDragState()
   const files = Array.from(event.dataTransfer?.files ?? [])
   if (!files.length) return
   try { addAttachments(await window.chatApi.stageDroppedFiles(files)) }
@@ -483,6 +499,7 @@ function jumpToMessage(messageId: string) {
 }
 
 watch(() => chatStore.currentConversationId, (conversationId) => {
+  resetFileDragState()
   quoteTarget.value = null
   historyKeyword.value = ''
   pendingAttachments.value = []
@@ -501,6 +518,9 @@ watch(() => chatStore.currentMessages.length, async (length, previousLength) => 
 })
 onMounted(async () => {
   recallClockTimer = window.setInterval(() => { recallClock.value = Date.now() }, 15_000)
+  window.addEventListener('dragend', resetFileDragState)
+  window.addEventListener('drop', resetFileDragState)
+  window.addEventListener('blur', resetFileDragState)
   await nextTick()
   resizeObserver = new ResizeObserver(() => {
     if (shouldStickToBottom) scrollToBottom()
@@ -512,6 +532,9 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   window.clearInterval(recallClockTimer)
+  window.removeEventListener('dragend', resetFileDragState)
+  window.removeEventListener('drop', resetFileDragState)
+  window.removeEventListener('blur', resetFileDragState)
   resizeObserver?.disconnect()
   stopScrollThumbDrag()
   window.clearTimeout(jumpHighlightTimer)
@@ -542,7 +565,7 @@ onBeforeUnmount(() => {
         </div>
         <div v-show="hasScrollableContent" class="chat-scroll-thumb" :class="{ dragging: isScrollThumbDragging }" :style="{ height: `${scrollThumbHeight}px`, transform: `translateY(${scrollThumbTop}px)` }" @pointerdown="startScrollThumbDrag" />
       </div>
-      <footer class="input-area no-drag" :class="{ 'dragging-files': draggingFiles }" @dragenter.prevent="draggingFiles = true" @dragover.prevent @dragleave.self="draggingFiles = false" @drop.prevent="handleFileDrop">
+      <footer class="input-area no-drag" :class="{ 'dragging-files': draggingFiles }" @dragenter.prevent="handleFileDragEnter" @dragover.prevent @dragleave.prevent="handleFileDragLeave" @drop.prevent="handleFileDrop">
         <div class="input-toolbar">
           <button title="发送文件" :disabled="composerBusy" @click="selectFiles"><el-icon><FolderOpened /></el-icon></button>
           <button title="截图" :disabled="composerBusy" @click="captureScreen"><el-icon><Scissor /></el-icon></button>
@@ -563,7 +586,7 @@ onBeforeUnmount(() => {
             <button title="移除" @click="removeAttachment(index)"><el-icon><Close /></el-icon></button>
           </div>
         </div>
-        <el-input v-model="draft" type="textarea" resize="none" class="input-textarea" placeholder="输入消息，按 Enter 发送；也可以拖入文件" @keydown.enter.exact.prevent="sendComposer" />
+        <el-input v-model="draft" type="textarea" resize="none" class="input-textarea" placeholder="输入消息，按 Enter 发送" @keydown.enter.exact.prevent="sendComposer" />
         <div v-if="quoteTarget" class="quote-composer" title="跳转到原消息" @click="jumpToMessage(quoteTarget.id)">
           <span><strong>{{ messageSenderDisplayName(quoteTarget) }}</strong><small>{{ quotePreview(quoteTarget) }}</small></span>
           <button title="取消引用" @click.stop="quoteTarget = null"><el-icon><Close /></el-icon></button>

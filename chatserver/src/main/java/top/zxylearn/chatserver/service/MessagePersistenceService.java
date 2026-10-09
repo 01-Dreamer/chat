@@ -44,8 +44,9 @@ public class MessagePersistenceService {
     private static final int CHAT_DIRECT = 0;
     private static final int CHAT_GROUP = 1;
     private static final int MESSAGE_TEXT = 0;
-    private static final int MESSAGE_RED_PACKET = 2;
     private static final int MESSAGE_FILE = 1;
+    private static final int MESSAGE_RED_PACKET = 2;
+    private static final int MESSAGE_CALL_PROMPT = 3;
     private static final int MESSAGE_RECALLED = 1;
     private static final int ROLE_ADMIN = 1;
     private static final int ROLE_OWNER = 2;
@@ -309,14 +310,14 @@ public class MessagePersistenceService {
                 throw new BusinessException("FILE_NOT_FOUND", "文件资源不存在", HttpStatus.NOT_FOUND);
             }
         }
-        if (messageType == 2) {
+        if (messageType == MESSAGE_RED_PACKET) {
             if (referenceId == null) throw new BusinessException("RED_PACKET_REFERENCE_REQUIRED", "红包消息缺少红包ID", HttpStatus.BAD_REQUEST);
             RedPacket packet = redPacketMapper.selectById(referenceId);
             if (packet == null || packet.getSenderId() != senderId || packet.getChatType() != chatType || packet.getTargetId() != targetId) {
                 throw new BusinessException("RED_PACKET_REFERENCE_INVALID", "红包不属于当前会话", HttpStatus.CONFLICT);
             }
         }
-        if (messageType == 3) {
+        if (messageType == MESSAGE_CALL_PROMPT) {
             if (referenceId == null) throw new BusinessException("CALL_REFERENCE_REQUIRED", "通话提示缺少通话记录ID", HttpStatus.BAD_REQUEST);
             CallRecord call = callRecordMapper.selectById(referenceId);
             boolean participantsMatch = call != null
@@ -336,6 +337,9 @@ public class MessagePersistenceService {
     private void checkRecallPermission(long currentUserId, Message message, LocalDateTime now) {
         if (message.getMessageType() == MESSAGE_RED_PACKET) {
             throw new BusinessException("RED_PACKET_RECALL_FORBIDDEN", "红包消息不能撤回", HttpStatus.CONFLICT);
+        }
+        if (message.getMessageType() == MESSAGE_CALL_PROMPT) {
+            throw new BusinessException("CALL_PROMPT_RECALL_FORBIDDEN", "通话提示不能撤回", HttpStatus.CONFLICT);
         }
         if (message.getSenderId() == currentUserId) {
             if (message.getCreatedTime() == null
