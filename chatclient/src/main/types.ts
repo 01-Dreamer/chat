@@ -1,4 +1,4 @@
-export type MessageType = 'text' | 'voice' | 'file' | 'red_packet'
+export type MessageType = 'text' | 'voice' | 'file' | 'red_packet' | 'call'
 export type MessageFileKind = 'document' | 'image' | 'video'
 
 export interface User {

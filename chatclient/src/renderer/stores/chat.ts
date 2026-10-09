@@ -117,7 +117,9 @@ export const useChatStore = defineStore('chat', () => {
             ? `[${message.fileKind === 'image' ? '图片' : message.fileKind === 'video' ? '视频' : '文件'}] ${message.fileName ?? ''}`.trim()
             : message.type === 'voice'
               ? '[语音]'
-              : '[红包]'
+              : message.type === 'red_packet'
+                ? '[红包]'
+                : '[通话]'
         conversation.time = '刚刚'
         conversation.lastActiveTime = Math.max(conversation.lastActiveTime ?? 0, message.createdAt)
       }

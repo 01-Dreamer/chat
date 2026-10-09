@@ -45,12 +45,14 @@ const displayAvatar = computed(() => props.own ? appStore.currentUser?.avatar : 
 const displayName = computed(() => props.own
   ? (appStore.currentUser?.nickname || props.message.senderName)
   : props.message.senderName)
+const canTranslate = computed(() => props.message.type === 'text')
 
 const replyPreview = computed(() => {
   const message = props.replyMessage
   if (!message) return '原消息暂不可用'
   if (message.status === 1) return '[消息已撤回]'
   if (message.type === 'red_packet') return '[红包]'
+  if (message.type === 'call') return '[通话]'
   if (message.type === 'voice') return '[语音]'
   if (message.type === 'file') {
     if (message.fileKind === 'image') return '[图片]'
@@ -138,6 +140,7 @@ async function toggleTranscript() {
 }
 
 async function translate() {
+  if (!canTranslate.value) return
   if (translatedText.value) { translatedText.value = ''; return }
   translating.value = true
   try { translatedText.value = await window.chatApi.translateText(props.message.content) }
@@ -253,6 +256,8 @@ watch(
         </button>
       </template>
 
+      <div v-else-if="message.type === 'call'" class="text-msg">{{ message.content }}</div>
+
       <template v-else-if="message.type === 'file'">
         <div v-if="message.fileKind === 'image'" class="img-msg">
           <img v-if="resourceUrl" :src="resourceUrl" :alt="message.fileName || '聊天图片'" class="image-content" @load="handleImageLoaded" @error="imageLoadFailed = true; resourceUrl = ''" />
@@ -296,7 +301,7 @@ watch(
     <button v-else-if="own && message.sendStatus === 'failed'" class="message-send-state failed" title="发送失败，点击重试" @click="emit('retry', message)"><el-icon><WarningFilled /></el-icon></button>
     <Teleport to="body">
       <div v-if="contextMenuVisible" class="message-context-menu no-drag" :style="{ left: `${contextMenuX}px`, top: `${contextMenuY}px` }" @click.stop @contextmenu.prevent>
-        <button v-if="message.type === 'text'" :disabled="translating" @click="runContextAction('translate')">{{ translatedText ? '收起翻译' : '翻译' }}</button>
+        <button v-if="canTranslate" :disabled="translating" @click="runContextAction('translate')">{{ translatedText ? '收起翻译' : '翻译' }}</button>
         <button v-if="canRecall" @click="runContextAction('recall')">撤回</button>
         <button @click="runContextAction('quote')">引用</button>
       </div>

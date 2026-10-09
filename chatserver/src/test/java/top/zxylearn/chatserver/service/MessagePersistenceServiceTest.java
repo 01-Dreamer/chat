@@ -93,6 +93,20 @@ class MessagePersistenceServiceTest {
     }
 
     @Test
+    void callPromptCannotBeRecalled() {
+        Message message = directMessage(LocalDateTime.now().minusMinutes(1));
+        message.setMessageType(3);
+        when(messageMapper.selectByIdForUpdate(100L)).thenReturn(message);
+        when(chatAccessCache.getDirectAccess(1L, 2L)).thenReturn(Optional.of(true));
+
+        BusinessException exception = assertThrows(BusinessException.class, () -> service.recall(1L, 100L));
+
+        assertEquals("CALL_PROMPT_RECALL_FORBIDDEN", exception.getCode());
+        assertEquals("通话提示不能撤回", exception.getMessage());
+        verify(messageMapper, never()).updateById(any(Message.class));
+    }
+
+    @Test
     void administratorCanRecallMemberMessageWithoutTimeLimit() {
         Message message = groupMessage(LocalDateTime.now().minusDays(2));
         GroupMember administrator = member(2L, 1);
