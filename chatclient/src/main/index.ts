@@ -21,6 +21,9 @@ let minimizedBounds: Rectangle | null = null
 let quittingAfterLogout = false
 let logoutInProgress = false
 
+app.setName('Chat')
+if (process.platform === 'win32') app.setAppUserModelId('top.zxylearn.chatclient')
+
 const windowSizes = {
   login: { width: 300, height: 270 },
   register: { width: 300, height: 380 },
@@ -270,6 +273,9 @@ function createWindow() {
     frame: false,
     transparent: true,
     titleBarStyle: 'hidden',
+    icon: app.isPackaged
+      ? join(process.resourcesPath, 'icon.png')
+      : join(__dirname, '../../build/icon.png'),
     show: false,
     autoHideMenuBar: true,
     webPreferences: {

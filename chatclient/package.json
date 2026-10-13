@@ -1,7 +1,9 @@
 {
   "name": "chatclient",
   "version": "0.1.0",
-  "description": "Electron desktop instant messaging client",
+  "description": "Chat desktop instant messaging client",
+  "homepage": "https://zxylearn.top",
+  "desktopName": "Chat.desktop",
   "main": "./out/main/index.js",
   "author": "chatclient",
   "license": "MIT",
@@ -9,6 +11,10 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build": "tsc -p tsconfig.node.json --noEmit && electron-vite build && vue-tsc --noEmit",
+    "dist": "npm run package:all",
+    "package:all": "node scripts/package-all.mjs",
+    "dist:win": "npm run build && electron-builder --win nsis --publish never",
+    "dist:linux": "npm run build && electron-builder --linux deb --publish never",
     "preview": "electron-vite preview",
     "start": "node scripts/start.mjs"
   },
@@ -16,14 +22,60 @@
     "@element-plus/icons-vue": "^2.3.2",
     "@vitejs/plugin-vue": "^5.2.4",
     "axios": "^1.20.0",
-    "electron": "^38.2.0",
     "element-plus": "^2.10.4",
     "pinia": "^3.0.3",
     "vue": "^3.5.18"
   },
   "devDependencies": {
+    "electron": "^38.8.6",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^4.0.0",
     "typescript": "^5.8.3",
     "vue-tsc": "^2.2.12"
+  },
+  "build": {
+    "appId": "top.zxylearn.chatclient",
+    "productName": "Chat",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico",
+      "executableName": "Chat",
+      "artifactName": "chat-win.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Chat",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico"
+    },
+    "linux": {
+      "target": "deb",
+      "icon": "build/icons",
+      "executableName": "chat",
+      "category": "Network",
+      "maintainer": "failedman",
+      "synopsis": "Chat instant messaging client",
+      "syncDesktopName": true,
+      "artifactName": "chat-linux.${ext}"
+    }
   }
 }

@@ -23,7 +23,7 @@ function switchMode(next: 'login' | 'register') {
 }
 
 async function submit() {
-  if (disabled.value) return
+  if (busy.value || disabled.value) return
   if (mode.value === 'register' && form.password !== form.confirmPassword) {
     ElMessage.warning('两次输入的密码不一致')
     return
@@ -65,12 +65,12 @@ async function submit() {
         <el-input v-model="form.username" size="large" clearable placeholder="请输入用户名"><template #prefix><el-icon><User /></el-icon></template></el-input>
       </el-form-item>
       <el-form-item>
-        <el-input v-model="form.password" size="large" type="password" show-password clearable placeholder="请输入密码" @keyup.enter="submit"><template #prefix><el-icon><Lock /></el-icon></template></el-input>
+        <el-input v-model="form.password" size="large" type="password" show-password clearable placeholder="请输入密码"><template #prefix><el-icon><Lock /></el-icon></template></el-input>
       </el-form-item>
       <el-form-item v-if="mode === 'register'">
-        <el-input v-model="form.confirmPassword" size="large" type="password" show-password placeholder="请确认密码" @keyup.enter="submit"><template #prefix><el-icon><Check /></el-icon></template></el-input>
+        <el-input v-model="form.confirmPassword" size="large" type="password" show-password placeholder="请确认密码"><template #prefix><el-icon><Check /></el-icon></template></el-input>
       </el-form-item>
-      <el-form-item><el-button class="account-submit" type="success" native-type="submit" :loading="busy" :disabled="disabled" @click="submit">{{ mode === 'login' ? '登录' : '注册' }}</el-button></el-form-item>
+      <el-form-item><el-button class="account-submit" type="success" native-type="submit" :loading="busy" :disabled="disabled || busy">{{ mode === 'login' ? '登录' : '注册' }}</el-button></el-form-item>
       <el-form-item><el-button class="account-switch" type="primary" @click="switchMode(mode === 'login' ? 'register' : 'login')">{{ mode === 'login' ? '去注册' : '去登录' }}</el-button></el-form-item>
     </el-form>
   </main>
